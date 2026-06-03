@@ -9,6 +9,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings,
   ShoppingBasket,
   Upload,
   Eye,
@@ -21,6 +22,54 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createBucket, listBuckets, listObjects, login, register } from "./api";
 import "./styles.css";
+
+function getRoute() {
+  const path = window.location.pathname;
+  if (path.startsWith("/browser/")) {
+    return {
+      page: "browser",
+      bucket: decodeURIComponent(path.slice("/browser/".length)),
+    };
+  }
+  if (path === "/browser") return { page: "browser", bucket: "" };
+  return { page: "login", bucket: "" };
+}
+
+function pushRoute(path) {
+  window.history.pushState({}, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+const SCALE_OPTIONS = [
+  { label: "75%", value: "0.75" },
+  { label: "90%", value: "0.9" },
+  { label: "100%", value: "1" },
+  { label: "110%", value: "1.1" },
+];
+
+function getInitialScale() {
+  const savedScale = localStorage.getItem("appScale");
+  return SCALE_OPTIONS.some((option) => option.value === savedScale) ? savedScale : "1";
+}
+
+function ScaleControl({ scale, onScaleChange }) {
+  return (
+    <label className="scale-control" title="Interface scale">
+      <Settings size={16} aria-hidden="true" />
+      <select
+        aria-label="Interface scale"
+        value={scale}
+        onChange={(event) => onScaleChange(event.target.value)}
+      >
+        {SCALE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 function WaveCanvas() {
   const canvasRef = useRef(null);
@@ -102,6 +151,8 @@ function WaveCanvas() {
 
 function App() {
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem("accessToken") || "");
+  const [appScale, setAppScale] = useState(getInitialScale);
+  const [route, setRoute] = useState(getRoute);
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -110,6 +161,22 @@ function App() {
   const [isSubmitting, setSubmitting] = useState(false);
 
   const canSubmit = username.trim() && password.length >= 8 && !isSubmitting;
+
+  useEffect(() => {
+    const handleRouteChange = () => setRoute(getRoute());
+    window.addEventListener("popstate", handleRouteChange);
+    return () => window.removeEventListener("popstate", handleRouteChange);
+  }, []);
+
+  useEffect(() => {
+    if (!accessToken && route.page !== "login") pushRoute("/login");
+    if (accessToken && route.page === "login") pushRoute("/browser");
+  }, [accessToken, route.page]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--app-scale", appScale);
+    localStorage.setItem("appScale", appScale);
+  }, [appScale]);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -127,6 +194,7 @@ function App() {
         localStorage.setItem("refreshToken", tokens.refresh);
         setAccessToken(tokens.access);
         setStatus("");
+        pushRoute("/browser");
       }
     } catch (error) {
       setStatus(error.message);
@@ -135,13 +203,33 @@ function App() {
     }
   }
 
+  function handleAuthExpired() {
+    localStorage.removeItem("accessToken");
+    localStorage.removeItem("refreshToken");
+    setAccessToken("");
+    setPassword("");
+    setStatus("Session expired. Login again.");
+    pushRoute("/login");
+  }
+
   if (accessToken) {
-    return <ObjectBrowser token={accessToken} onSignOut={() => {
-      localStorage.removeItem("accessToken");
-      localStorage.removeItem("refreshToken");
-      setAccessToken("");
-      setPassword("");
-    }} />;
+    return (
+      <ObjectBrowser
+        appScale={appScale}
+        routeBucket={route.bucket}
+        token={accessToken}
+        onAuthExpired={handleAuthExpired}
+        onScaleChange={setAppScale}
+        onSelectBucket={(bucket) => pushRoute(`/browser/${encodeURIComponent(bucket)}`)}
+        onSignOut={() => {
+          localStorage.removeItem("accessToken");
+          localStorage.removeItem("refreshToken");
+          setAccessToken("");
+          setPassword("");
+          pushRoute("/login");
+        }}
+      />
+    );
   }
 
   return (
@@ -159,10 +247,11 @@ function App() {
       </section>
 
       <section className="auth-panel" aria-label="Authentication">
+        <ScaleControl scale={appScale} onScaleChange={setAppScale} />
+
         <div className="brand-lockup">
           <div className="brand-minio">MINIO</div>
           <div className="brand-title">OBJECT <span>STORE</span></div>
-          <div className="brand-badge">Community Edition</div>
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit}>
@@ -224,7 +313,7 @@ function App() {
   );
 }
 
-function ObjectBrowser({ token, onSignOut }) {
+function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleChange, onSelectBucket, onSignOut }) {
   const [isModalOpen, setModalOpen] = useState(false);
   const [bucketName, setBucketName] = useState("");
   const [buckets, setBuckets] = useState([]);
@@ -252,6 +341,11 @@ function ObjectBrowser({ token, onSignOut }) {
   }, []);
 
   useEffect(() => {
+    setModalOpen(false);
+    if (routeBucket) setSelectedBucket(routeBucket);
+  }, [routeBucket]);
+
+  useEffect(() => {
     if (selectedBucket) refreshObjects(selectedBucket);
     else setObjects([]);
   }, [selectedBucket]);
@@ -266,8 +360,16 @@ function ObjectBrowser({ token, onSignOut }) {
         createdAt: bucket.created_at,
       }));
       setBuckets(nextBuckets);
-      setSelectedBucket((current) => current || nextBuckets[0]?.name || "");
+      setSelectedBucket((current) => {
+        if (routeBucket && nextBuckets.some((bucket) => bucket.name === routeBucket)) return routeBucket;
+        if (current && nextBuckets.some((bucket) => bucket.name === current)) return current;
+        return nextBuckets[0]?.name || "";
+      });
     } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
       setStatus(error.message);
     } finally {
       setLoading(false);
@@ -281,6 +383,10 @@ function ObjectBrowser({ token, onSignOut }) {
       const data = await listObjects(token, bucket);
       setObjects(data.objects || []);
     } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
       setStatus(error.message);
     } finally {
       setLoading(false);
@@ -300,10 +406,15 @@ function ObjectBrowser({ token, onSignOut }) {
       };
       setBuckets((items) => [...items, created]);
       setSelectedBucket(bucket.name);
+      onSelectBucket(bucket.name);
       setBucketName("");
       setModalOpen(false);
       setStatus(`Bucket "${bucket.name}" created.`);
     } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
       setStatus(error.message);
     } finally {
       setCreating(false);
@@ -316,7 +427,6 @@ function ObjectBrowser({ token, onSignOut }) {
         <div className="sidebar-brand">
           <div className="sidebar-minio">MINIO</div>
           <div className="sidebar-title">OBJECT <span>STORE</span></div>
-          <div className="sidebar-badge">Community Edition</div>
           <button className="collapse-button" aria-label="Collapse sidebar">
             <ArrowLeft size={20} />
           </button>
@@ -342,7 +452,7 @@ function ObjectBrowser({ token, onSignOut }) {
             <button
               className={bucket.name === selectedBucket ? "bucket-nav-item active" : "bucket-nav-item"}
               key={bucket.name}
-              onClick={() => setSelectedBucket(bucket.name)}
+              onClick={() => onSelectBucket(bucket.name)}
             >
               <span><ShoppingBasket size={18} fill="currentColor" /></span>
               {bucket.name}
@@ -380,6 +490,7 @@ function ObjectBrowser({ token, onSignOut }) {
             </label>
           ) : null}
           <div className="header-actions">
+            <ScaleControl scale={appScale} onScaleChange={onScaleChange} />
             <button aria-label="Help"><CircleHelp size={20} /></button>
             <button aria-label="Toggle dark mode"><Moon size={20} /></button>
           </div>

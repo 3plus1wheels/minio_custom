@@ -14,7 +14,9 @@ export async function apiRequest(path, { token, ...options } = {}) {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(error.detail || "Request failed");
+    const apiError = new Error(error.detail || "Request failed");
+    apiError.status = response.status;
+    throw apiError;
   }
 
   if (response.status === 204) return null;
