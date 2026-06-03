@@ -95,15 +95,25 @@ class ObjectView(APIView):
         except (ClientError, BotoCoreError) as exc:
             return error_response(exc)
 
-        objects = [
-            {
-                "key": item["Key"],
+        s3_client = get_s3_client()
+        objects = []
+        for item in response.get("Contents", []):
+            key = item["Key"]
+            object_data = {
+                "key": key,
                 "size": item["Size"],
                 "last_modified": item["LastModified"],
                 "etag": item["ETag"],
+                "content_type": "binary/octet-stream",
+                "metadata": {},
             }
-            for item in response.get("Contents", [])
-        ]
+            try:
+                head = s3_client.head_object(Bucket=bucket, Key=key)
+            except (ClientError, BotoCoreError):
+                head = {}
+            object_data["content_type"] = head.get("ContentType") or object_data["content_type"]
+            object_data["metadata"] = head.get("Metadata") or {}
+            objects.append(object_data)
         return Response({"objects": objects})
 
     def post(self, request, bucket):
@@ -112,8 +122,15 @@ class ObjectView(APIView):
         uploaded_file = serializer.validated_data["file"]
         key = serializer.validated_data.get("key") or uploaded_file.name
 
+        extra_args = {}
+        if uploaded_file.content_type:
+            extra_args["ContentType"] = uploaded_file.content_type
+
         try:
-            get_s3_client().upload_fileobj(uploaded_file, bucket, key)
+            if extra_args:
+                get_s3_client().upload_fileobj(uploaded_file, bucket, key, ExtraArgs=extra_args)
+            else:
+                get_s3_client().upload_fileobj(uploaded_file, bucket, key)
         except (ClientError, BotoCoreError) as exc:
             return error_response(exc)
 
@@ -130,3 +147,82 @@ class ObjectView(APIView):
             return error_response(exc)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ObjectShareView(APIView):
+    def get(self, request, bucket):
+        key = request.query_params.get("key")
+        if not key:
+            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+
+        try:
+            url = get_s3_client().generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=3600,
+            )
+        except (ClientError, BotoCoreError) as exc:
+            return error_response(exc)
+
+        return Response({"url": url, "expires_in": 3600})
+
+
+class ObjectTagsView(APIView):
+    def get(self, request, bucket):
+        key = request.query_params.get("key")
+        if not key:
+            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+
+        try:
+            response = get_s3_client().get_object_tagging(Bucket=bucket, Key=key)
+        except (ClientError, BotoCoreError) as exc:
+            return error_response(exc)
+
+        tags = {item["Key"]: item["Value"] for item in response.get("TagSet", [])}
+        return Response({"tags": tags})
+
+    def put(self, request, bucket):
+        key = request.query_params.get("key")
+        if not key:
+            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+
+        tags = request.data.get("tags", {})
+        if not isinstance(tags, dict):
+            return Response({"detail": "'tags' must be an object."}, status=400)
+
+        tag_set = [{"Key": str(name), "Value": str(value)} for name, value in tags.items()]
+        try:
+            get_s3_client().put_object_tagging(
+                Bucket=bucket,
+                Key=key,
+                Tagging={"TagSet": tag_set},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            return error_response(exc)
+
+        return Response({"tags": tags})
+
+
+class ObjectVersionsView(APIView):
+    def get(self, request, bucket):
+        key = request.query_params.get("key")
+        if not key:
+            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+
+        try:
+            response = get_s3_client().list_object_versions(Bucket=bucket, Prefix=key)
+        except (ClientError, BotoCoreError) as exc:
+            return error_response(exc)
+
+        versions = [
+            {
+                "version_id": item.get("VersionId"),
+                "is_latest": item.get("IsLatest", False),
+                "last_modified": item.get("LastModified"),
+                "size": item.get("Size", 0),
+                "etag": item.get("ETag"),
+            }
+            for item in response.get("Versions", [])
+            if item.get("Key") == key
+        ]
+        return Response({"versions": versions})

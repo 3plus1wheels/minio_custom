@@ -1,6 +1,14 @@
 from django.urls import path
 
-from storage_api.views import BucketDetailView, BucketListCreateView, MeView, ObjectView
+from storage_api.views import (
+    BucketDetailView,
+    BucketListCreateView,
+    MeView,
+    ObjectShareView,
+    ObjectTagsView,
+    ObjectVersionsView,
+    ObjectView,
+)
 
 
 urlpatterns = [
@@ -14,4 +22,7 @@ urlpatterns = [
         {"download": True},
         name="object-download",
     ),
+    path("buckets/<str:bucket>/objects/share/", ObjectShareView.as_view(), name="object-share"),
+    path("buckets/<str:bucket>/objects/tags/", ObjectTagsView.as_view(), name="object-tags"),
+    path("buckets/<str:bucket>/objects/versions/", ObjectVersionsView.as_view(), name="object-versions"),
 ]

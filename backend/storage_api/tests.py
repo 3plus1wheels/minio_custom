@@ -81,6 +81,24 @@ class StorageApiTests(TestCase):
             "Body": BytesIO(b"hello"),
             "ContentType": "text/plain",
         }
+        s3.head_object.return_value = {
+            "ContentType": "text/plain",
+            "Metadata": {},
+        }
+        s3.generate_presigned_url.return_value = "https://example.test/share"
+        s3.get_object_tagging.return_value = {"TagSet": [{"Key": "env", "Value": "test"}]}
+        s3.list_object_versions.return_value = {
+            "Versions": [
+                {
+                    "Key": "notes.txt",
+                    "VersionId": "1",
+                    "IsLatest": True,
+                    "LastModified": modified_at,
+                    "Size": 5,
+                    "ETag": '"abc"',
+                }
+            ]
+        }
 
         upload_response = self.client.post(
             reverse("object-list-create-delete", kwargs={"bucket": "docs"}),
@@ -93,6 +111,7 @@ class StorageApiTests(TestCase):
         list_response = self.client.get(reverse("object-list-create-delete", kwargs={"bucket": "docs"}))
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.data["objects"][0]["key"], "notes.txt")
+        self.assertEqual(list_response.data["objects"][0]["content_type"], "text/plain")
 
         download_response = self.client.get(
             reverse("object-download", kwargs={"bucket": "docs"}),
@@ -100,6 +119,33 @@ class StorageApiTests(TestCase):
         )
         self.assertEqual(download_response.status_code, 200)
         self.assertEqual(b"".join(download_response.streaming_content), b"hello")
+
+        share_response = self.client.get(reverse("object-share", kwargs={"bucket": "docs"}), {"key": "notes.txt"})
+        self.assertEqual(share_response.status_code, 200)
+        self.assertEqual(share_response.data["url"], "https://example.test/share")
+
+        tags_response = self.client.get(reverse("object-tags", kwargs={"bucket": "docs"}), {"key": "notes.txt"})
+        self.assertEqual(tags_response.status_code, 200)
+        self.assertEqual(tags_response.data["tags"], {"env": "test"})
+
+        save_tags_response = self.client.put(
+            f'{reverse("object-tags", kwargs={"bucket": "docs"})}?key=notes.txt',
+            {"tags": {"env": "prod"}},
+            format="json",
+        )
+        self.assertEqual(save_tags_response.status_code, 200)
+        s3.put_object_tagging.assert_called_once_with(
+            Bucket="docs",
+            Key="notes.txt",
+            Tagging={"TagSet": [{"Key": "env", "Value": "prod"}]},
+        )
+
+        versions_response = self.client.get(
+            reverse("object-versions", kwargs={"bucket": "docs"}),
+            {"key": "notes.txt"},
+        )
+        self.assertEqual(versions_response.status_code, 200)
+        self.assertEqual(versions_response.data["versions"][0]["version_id"], "1")
 
         delete_response = self.client.delete(
             f'{reverse("object-list-create-delete", kwargs={"bucket": "docs"})}?key=notes.txt'

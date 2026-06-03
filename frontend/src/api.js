@@ -52,3 +52,77 @@ export function listBuckets(token) {
 export function listObjects(token, bucket) {
   return apiRequest(`/buckets/${encodeURIComponent(bucket)}/objects/`, { token });
 }
+
+export function uploadObject(token, bucket, file, key) {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (key) formData.append("key", key);
+
+  return apiRequest(`/buckets/${encodeURIComponent(bucket)}/objects/`, {
+    token,
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function downloadObject(token, bucket, key) {
+  const response = await fetch(
+    `${API_BASE_URL}/buckets/${encodeURIComponent(bucket)}/objects/download/?key=${encodeURIComponent(key)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    const apiError = new Error(error.detail || "Request failed");
+    apiError.status = response.status;
+    throw apiError;
+  }
+
+  return response.blob();
+}
+
+export function shareObject(token, bucket, key) {
+  return apiRequest(
+    `/buckets/${encodeURIComponent(bucket)}/objects/share/?key=${encodeURIComponent(key)}`,
+    { token }
+  );
+}
+
+export function getObjectTags(token, bucket, key) {
+  return apiRequest(
+    `/buckets/${encodeURIComponent(bucket)}/objects/tags/?key=${encodeURIComponent(key)}`,
+    { token }
+  );
+}
+
+export function saveObjectTags(token, bucket, key, tags) {
+  return apiRequest(
+    `/buckets/${encodeURIComponent(bucket)}/objects/tags/?key=${encodeURIComponent(key)}`,
+    {
+      token,
+      method: "PUT",
+      body: JSON.stringify({ tags }),
+    }
+  );
+}
+
+export function listObjectVersions(token, bucket, key) {
+  return apiRequest(
+    `/buckets/${encodeURIComponent(bucket)}/objects/versions/?key=${encodeURIComponent(key)}`,
+    { token }
+  );
+}
+
+export function deleteObject(token, bucket, key) {
+  return apiRequest(
+    `/buckets/${encodeURIComponent(bucket)}/objects/?key=${encodeURIComponent(key)}`,
+    {
+      token,
+      method: "DELETE",
+    }
+  );
+}

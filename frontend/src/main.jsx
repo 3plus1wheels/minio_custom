@@ -4,23 +4,45 @@ import {
   CircleHelp,
   ClipboardCheck,
   Copy,
+  Download,
+  FileText,
+  Folder,
   LogOut,
   Moon,
+  Share2,
   Plus,
   RefreshCw,
   Search,
   Settings,
   ShoppingBasket,
+  Tag,
+  Trash2,
   Upload,
   Eye,
   EyeOff,
+  FolderPlus,
+  History,
   LockKeyhole,
   User,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { createBucket, listBuckets, listObjects, login, register } from "./api";
+import { defaultStyles, FileIcon } from "react-file-icon";
+import {
+  createBucket,
+  deleteObject,
+  downloadObject,
+  getObjectTags,
+  listBuckets,
+  listObjects,
+  listObjectVersions,
+  login,
+  register,
+  saveObjectTags,
+  shareObject,
+  uploadObject,
+} from "./api";
 import "./styles.css";
 
 function getRoute() {
@@ -68,6 +90,141 @@ function ScaleControl({ scale, onScaleChange }) {
         ))}
       </select>
     </label>
+  );
+}
+
+function buildObjectEntries(objects, prefix, filter, pendingFolders = []) {
+  const normalizedPrefix = prefix || "";
+  const normalizedFilter = filter.trim().toLowerCase();
+  const folders = new Map();
+  const files = [];
+
+  function addFolder(folderKey, lastModified) {
+    if (!folderKey.startsWith(normalizedPrefix)) return;
+
+    const remainder = folderKey.slice(normalizedPrefix.length);
+    if (!remainder) return;
+
+    const slashIndex = remainder.indexOf("/");
+    if (slashIndex < 0) return;
+
+    const name = remainder.slice(0, slashIndex);
+    if (!name) return;
+
+    const visibleFolderKey = `${normalizedPrefix}${name}/`;
+    const existing = folders.get(visibleFolderKey);
+    const itemModified = lastModified ? new Date(lastModified).getTime() : 0;
+    const existingModified = existing?.last_modified ? new Date(existing.last_modified).getTime() : 0;
+
+    folders.set(visibleFolderKey, {
+      type: "folder",
+      key: visibleFolderKey,
+      name,
+      size: null,
+      last_modified: itemModified > existingModified ? lastModified : existing?.last_modified,
+    });
+  }
+
+  for (const folderKey of pendingFolders) {
+    addFolder(folderKey);
+  }
+
+  for (const item of objects) {
+    if (!item.key.startsWith(normalizedPrefix)) continue;
+
+    const remainder = item.key.slice(normalizedPrefix.length);
+    if (!remainder) continue;
+
+    const slashIndex = remainder.indexOf("/");
+    if (slashIndex >= 0) {
+      addFolder(`${normalizedPrefix}${remainder.slice(0, slashIndex + 1)}`, item.last_modified);
+      continue;
+    }
+
+    files.push({
+      ...item,
+      type: "file",
+      name: remainder,
+    });
+  }
+
+  return [...folders.values(), ...files]
+    .filter((entry) => entry.name.toLowerCase().includes(normalizedFilter))
+    .sort((a, b) => {
+      if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+    });
+}
+
+function getParentPrefix(prefix) {
+  const parts = prefix.split("/").filter(Boolean);
+  parts.pop();
+  return parts.length ? `${parts.join("/")}/` : "";
+}
+
+function normalizeFolderPath(value) {
+  return value
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("/");
+}
+
+function getFileExtension(name) {
+  const basename = name.split("/").pop() || "";
+  const dotIndex = basename.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === basename.length - 1) return "";
+  return basename.slice(dotIndex + 1).toLowerCase();
+}
+
+function getObjectPath(bucketName, key) {
+  const pathParts = key.split("/").filter(Boolean);
+  return [bucketName, ...pathParts].filter(Boolean).join(" / ");
+}
+
+function getContentType(item) {
+  return item.content_type || item.contentType || "binary/octet-stream";
+}
+
+function getMetadataEntries(item) {
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  return Object.entries(metadata).filter(([, value]) => value !== undefined && value !== null && value !== "");
+}
+
+function getTagEntries(item) {
+  const tags = item.tags && typeof item.tags === "object" ? item.tags : {};
+  return Object.entries(tags).filter(([, value]) => value !== undefined && value !== null && value !== "");
+}
+
+function parseTagLines(value) {
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .reduce((tags, line) => {
+      const separatorIndex = line.indexOf("=");
+      if (separatorIndex < 0) return tags;
+      const name = line.slice(0, separatorIndex).trim();
+      const tagValue = line.slice(separatorIndex + 1).trim();
+      if (name) tags[name] = tagValue;
+      return tags;
+    }, {});
+}
+
+function formatTagLines(tags) {
+  return Object.entries(tags || {})
+    .map(([name, value]) => `${name}=${value}`)
+    .join("\n");
+}
+
+function FileTypeIcon({ name }) {
+  const extension = getFileExtension(name);
+  const style = defaultStyles[extension] || {};
+
+  return (
+    <span className="file-type-icon" aria-hidden="true">
+      <FileIcon extension={extension} {...style} />
+    </span>
   );
 }
 
@@ -278,13 +435,18 @@ function App() {
               className="icon-button"
               type="button"
               aria-label={showPassword ? "Hide password" : "Show password"}
+              title={showPassword ? "Hide password" : "Show password"}
               onClick={() => setShowPassword((value) => !value)}
             >
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>
           </label>
 
-          <button className="submit-button" disabled={!canSubmit}>
+          <button
+            className="submit-button"
+            disabled={!canSubmit}
+            title={mode === "login" ? "Login to object browser" : "Create new account"}
+          >
             {isSubmitting ? "Working..." : mode === "login" ? "Login" : "Create account"}
           </button>
 
@@ -293,6 +455,7 @@ function App() {
           <button
             className="mode-button"
             type="button"
+            title={mode === "login" ? "Switch to account registration" : "Switch to login"}
             onClick={() => {
               setStatus("");
               setMode((value) => (value === "login" ? "register" : "login"));
@@ -314,27 +477,46 @@ function App() {
 }
 
 function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleChange, onSelectBucket, onSignOut }) {
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
   const [isModalOpen, setModalOpen] = useState(false);
+  const [isPathModalOpen, setPathModalOpen] = useState(false);
+  const [isTagsModalOpen, setTagsModalOpen] = useState(false);
+  const [isUploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [bucketName, setBucketName] = useState("");
+  const [newFolderPath, setNewFolderPath] = useState("");
+  const [tagDraft, setTagDraft] = useState("");
   const [buckets, setBuckets] = useState([]);
   const [selectedBucket, setSelectedBucket] = useState("");
   const [objects, setObjects] = useState([]);
+  const [currentPrefix, setCurrentPrefix] = useState("");
+  const [selectedObject, setSelectedObject] = useState(null);
+  const [pendingFolders, setPendingFolders] = useState([]);
   const [bucketFilter, setBucketFilter] = useState("");
   const [objectFilter, setObjectFilter] = useState("");
   const [status, setStatus] = useState("");
+  const [isPathCopied, setPathCopied] = useState(false);
   const [isCreating, setCreating] = useState(false);
   const [isLoading, setLoading] = useState(false);
+  const [isUploading, setUploading] = useState(false);
+  const [isSavingTags, setSavingTags] = useState(false);
 
   const normalizedName = bucketName.trim().toLowerCase();
+  const normalizedFolderPath = normalizeFolderPath(newFolderPath);
   const isValidBucketName = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(normalizedName);
   const canCreate = isValidBucketName && !isCreating;
+  const canCreatePath = normalizedFolderPath.length > 0;
   const filteredBuckets = buckets.filter((bucket) =>
     bucket.name.toLowerCase().includes(bucketFilter.trim().toLowerCase())
   );
   const selected = buckets.find((bucket) => bucket.name === selectedBucket);
-  const filteredObjects = objects.filter((item) =>
-    item.key.toLowerCase().includes(objectFilter.trim().toLowerCase())
-  );
+  const objectEntries = buildObjectEntries(objects, currentPrefix, objectFilter, pendingFolders);
+  const objectCount = objects.length;
+  const totalSize = objects.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+  const currentPath = currentPrefix ? `${selected?.name || ""} / ${currentPrefix.split("/").filter(Boolean).join(" / ")}` : selected?.name;
+  const displayedPath = selectedObject ? getObjectPath(selected?.name || "", selectedObject.key) : currentPath;
+  const selectedMetadataEntries = selectedObject ? getMetadataEntries(selectedObject) : [];
+  const selectedTagEntries = selectedObject ? getTagEntries(selectedObject) : [];
 
   useEffect(() => {
     refreshBuckets();
@@ -342,13 +524,25 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
 
   useEffect(() => {
     setModalOpen(false);
+    setPathModalOpen(false);
+    setTagsModalOpen(false);
     if (routeBucket) setSelectedBucket(routeBucket);
   }, [routeBucket]);
 
   useEffect(() => {
     if (selectedBucket) refreshObjects(selectedBucket);
     else setObjects([]);
+    setCurrentPrefix("");
+    setSelectedObject(null);
+    setPendingFolders([]);
+    setPathCopied(false);
   }, [selectedBucket]);
+
+  useEffect(() => {
+    if (!isPathCopied) return undefined;
+    const timeoutId = window.setTimeout(() => setPathCopied(false), 1600);
+    return () => window.clearTimeout(timeoutId);
+  }, [isPathCopied]);
 
   async function refreshBuckets() {
     setLoading(true);
@@ -381,7 +575,15 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     setStatus("");
     try {
       const data = await listObjects(token, bucket);
-      setObjects(data.objects || []);
+      const nextObjects = data.objects || [];
+      setObjects(nextObjects);
+      setSelectedObject((current) => {
+        if (!current) return null;
+        return nextObjects.find((item) => item.key === current.key) || null;
+      });
+      setPendingFolders((folders) =>
+        folders.filter((folder) => !nextObjects.some((item) => item.key.startsWith(folder)))
+      );
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -421,18 +623,212 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     }
   }
 
+  async function uploadFiles(files) {
+    if (!selected || files.length === 0) return;
+    setUploading(true);
+    setStatus(`Uploading ${files.length} file${files.length === 1 ? "" : "s"}...`);
+
+    try {
+      for (const file of files) {
+        const key = `${currentPrefix}${file.webkitRelativePath || file.name}`;
+        await uploadObject(token, selected.name, file, key);
+      }
+      setStatus(`Uploaded ${files.length} file${files.length === 1 ? "" : "s"}.`);
+      await refreshObjects(selected.name);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      if (folderInputRef.current) folderInputRef.current.value = "";
+    }
+  }
+
+  function handleUploadFileChange(event) {
+    uploadFiles(Array.from(event.target.files || []));
+  }
+
+  function handleUploadFolderChange(event) {
+    uploadFiles(Array.from(event.target.files || []));
+  }
+
+  function handleCreatePath(event) {
+    event.preventDefault();
+    if (!canCreatePath) return;
+
+    const folderKey = `${currentPrefix}${normalizedFolderPath}/`;
+    setPendingFolders((folders) => (folders.includes(folderKey) ? folders : [...folders, folderKey]));
+    setNewFolderPath("");
+    setPathModalOpen(false);
+    setStatus(`Path "${folderKey}" ready. Upload a file into it to persist it.`);
+  }
+
+  async function handleCopyPath() {
+    if (!selected) return;
+
+    const path = selectedObject ? `${selected.name}/${selectedObject.key}` : currentPrefix ? `${selected.name}/${currentPrefix}` : selected.name;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(path);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = path;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setPathCopied(true);
+      setStatus(`Copied "${path}" to clipboard.`);
+    } catch (error) {
+      setPathCopied(false);
+      setStatus("Could not copy path to clipboard.");
+    }
+  }
+
+  async function handleDownloadObject() {
+    if (!selected || !selectedObject) return;
+    try {
+      const blob = await downloadObject(token, selected.name, selectedObject.key);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = selectedObject.name;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setStatus(`Downloading "${selectedObject.name}".`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleShareObject({ openPreview = false } = {}) {
+    if (!selected || !selectedObject) return;
+    try {
+      const data = await shareObject(token, selected.name, selectedObject.key);
+      if (openPreview) {
+        window.open(data.url, "_blank", "noopener,noreferrer");
+        setStatus(`Opened preview for "${selectedObject.name}".`);
+        return;
+      }
+
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(data.url);
+        setStatus(`Share link copied for "${selectedObject.name}".`);
+      } else {
+        setStatus(`Share link: ${data.url}`);
+      }
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleOpenTags() {
+    if (!selected || !selectedObject) return;
+    try {
+      const data = await getObjectTags(token, selected.name, selectedObject.key);
+      setTagDraft(formatTagLines(data.tags));
+      setTagsModalOpen(true);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleSaveTags(event) {
+    event.preventDefault();
+    if (!selected || !selectedObject) return;
+    setSavingTags(true);
+    try {
+      const tags = parseTagLines(tagDraft);
+      const data = await saveObjectTags(token, selected.name, selectedObject.key, tags);
+      setObjects((items) =>
+        items.map((item) => (item.key === selectedObject.key ? { ...item, tags: data.tags } : item))
+      );
+      setSelectedObject((item) => (item ? { ...item, tags: data.tags } : item));
+      setTagsModalOpen(false);
+      setStatus(`Tags saved for "${selectedObject.name}".`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    } finally {
+      setSavingTags(false);
+    }
+  }
+
+  async function handleDisplayVersions() {
+    if (!selected || !selectedObject) return;
+    try {
+      const data = await listObjectVersions(token, selected.name, selectedObject.key);
+      const count = data.versions?.length || 0;
+      setStatus(
+        count
+          ? `${count} version${count === 1 ? "" : "s"} found for "${selectedObject.name}".`
+          : `No object versions found for "${selectedObject.name}".`
+      );
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleDeleteObject() {
+    if (!selected || !selectedObject) return;
+    const objectName = selectedObject.name;
+    if (!window.confirm(`Delete "${objectName}"? This cannot be undone.`)) return;
+    try {
+      await deleteObject(token, selected.name, selectedObject.key);
+      setObjects((items) => items.filter((item) => item.key !== selectedObject.key));
+      setSelectedObject(null);
+      setStatus(`Deleted "${objectName}".`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
   return (
     <main className="browser-shell">
       <aside className="browser-sidebar">
         <div className="sidebar-brand">
           <div className="sidebar-minio">MINIO</div>
           <div className="sidebar-title">OBJECT <span>STORE</span></div>
-          <button className="collapse-button" aria-label="Collapse sidebar">
+          <button className="collapse-button" aria-label="Collapse sidebar" title="Collapse sidebar">
             <ArrowLeft size={20} />
           </button>
         </div>
 
-        <button className="sidebar-action" onClick={() => setModalOpen(true)}>
+        <button className="sidebar-action" title="Create a new bucket" onClick={() => setModalOpen(true)}>
           <span><Plus size={24} /></span>
           Create Bucket
         </button>
@@ -452,6 +848,7 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
             <button
               className={bucket.name === selectedBucket ? "bucket-nav-item active" : "bucket-nav-item"}
               key={bucket.name}
+              title={`Open bucket ${bucket.name}`}
               onClick={() => onSelectBucket(bucket.name)}
             >
               <span><ShoppingBasket size={18} fill="currentColor" /></span>
@@ -470,7 +867,7 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
           <span><ClipboardCheck size={18} /></span>
           License
         </a>
-        <button className="sidebar-link signout" onClick={onSignOut}>
+        <button className="sidebar-link signout" title="Sign out" onClick={onSignOut}>
           <span><LogOut size={18} /></span>
           Sign Out
         </button>
@@ -491,8 +888,8 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
           ) : null}
           <div className="header-actions">
             <ScaleControl scale={appScale} onScaleChange={onScaleChange} />
-            <button aria-label="Help"><CircleHelp size={20} /></button>
-            <button aria-label="Toggle dark mode"><Moon size={20} /></button>
+            <button aria-label="Help" title="Help"><CircleHelp size={20} /></button>
+            <button aria-label="Toggle dark mode" title="Toggle dark mode"><Moon size={20} /></button>
           </div>
         </header>
 
@@ -507,37 +904,258 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
                     <p>
                       Created on: <strong>{formatCreatedAt(selected.createdAt)}</strong>
                       <span>Access: <strong>PRIVATE</strong></span>
+                      <span>{formatBytes(totalSize)} - {objectCount} Object{objectCount === 1 ? "" : "s"}</span>
                     </p>
                   </div>
                 </div>
                 <div className="bucket-toolbar">
-                  <button disabled>Rewind <RefreshCw size={18} /></button>
-                  <button onClick={() => refreshObjects(selected.name)}>Refresh <RefreshCw size={18} /></button>
-                  <button className="upload-button">Upload <Upload size={20} /></button>
+                  <button disabled title="Restore earlier object versions">Rewind <RefreshCw size={18} /></button>
+                  <button
+                    onClick={() => refreshObjects(selected.name)}
+                    title="Reload objects in this bucket"
+                  >
+                    Refresh <RefreshCw size={18} />
+                  </button>
+                  <div className="upload-menu-wrap">
+                    <button
+                      className="upload-button"
+                      disabled={isUploading}
+                      title="Upload files or folders"
+                      onClick={() => setUploadMenuOpen((value) => !value)}
+                    >
+                      {isUploading ? "Uploading..." : "Upload"} <Upload size={20} />
+                    </button>
+                    {isUploadMenuOpen ? (
+                      <div className="upload-menu">
+                        <button
+                          title="Choose files to upload"
+                          onClick={() => {
+                            setUploadMenuOpen(false);
+                            fileInputRef.current?.click();
+                          }}
+                        >
+                          <Upload size={28} /> Upload File
+                        </button>
+                        <button
+                          title="Choose a folder to upload"
+                          onClick={() => {
+                            setUploadMenuOpen(false);
+                            folderInputRef.current?.click();
+                          }}
+                        >
+                          <Upload size={28} /> Upload Folder
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </header>
 
-              <div className="path-row">
-                <button aria-label="Back">‹</button>
-                <div>{selected.name}</div>
-                <button aria-label="Copy path"><Copy size={18} /></button>
-                <button>Create new path <span>:%</span></button>
+              <div className={selectedObject ? "path-row path-row-with-panel" : "path-row"}>
+                <button
+                  aria-label="Back"
+                  title="Go to parent path"
+                  disabled={!currentPrefix}
+                  onClick={() => {
+                    setSelectedObject(null);
+                    setCurrentPrefix((prefix) => getParentPrefix(prefix));
+                  }}
+                >
+                  ‹
+                </button>
+                <div>{displayedPath}</div>
+                <button
+                  aria-label={isPathCopied ? "Path copied" : "Copy path"}
+                  title={isPathCopied ? "Path copied" : "Copy path"}
+                  onClick={handleCopyPath}
+                >
+                  {isPathCopied ? <ClipboardCheck size={18} /> : <Copy size={18} />}
+                </button>
+                <button
+                  aria-label="Create new path"
+                  className="path-create-button"
+                  title="Create a folder-like path in this bucket"
+                  onClick={() => setPathModalOpen(true)}
+                >
+                  Create new path <FolderPlus size={18} />
+                </button>
               </div>
 
-              {filteredObjects.length === 0 ? (
-                <p className="empty-location">
-                  {isLoading ? "Loading..." : "This location is empty, please try uploading a new file"}
-                </p>
-              ) : (
-                <div className="object-table">
-                  {filteredObjects.map((item) => (
-                    <div className="object-row" key={item.key}>
-                      <span>{item.key}</span>
-                      <span>{formatBytes(item.size)}</span>
+              <div className={selectedObject ? "object-workspace has-object-panel" : "object-workspace"}>
+                {objectEntries.length === 0 ? (
+                  <p className="empty-location">
+                    {isLoading ? "Loading..." : "This location is empty, please try uploading a new file"}
+                  </p>
+                ) : (
+                  <div className="object-table">
+                    <div className="object-row object-row-header">
+                      <span>Name</span>
+                      <span>Last Modified</span>
+                      <span>Size</span>
                     </div>
-                  ))}
-                </div>
-              )}
+                    {objectEntries.map((item) => (
+                      <button
+                        className={[
+                          "object-row",
+                          item.type === "folder" ? "folder-row" : "file-row",
+                          selectedObject?.key === item.key ? "selected" : "",
+                        ].filter(Boolean).join(" ")}
+                        key={item.key}
+                        type="button"
+                        title={item.type === "folder" ? `Open folder ${item.name}` : `View details for ${item.name}`}
+                        onClick={() => {
+                          if (item.type === "folder") {
+                            setSelectedObject(null);
+                            setCurrentPrefix(item.key);
+                            return;
+                          }
+                          setSelectedObject(item);
+                        }}
+                      >
+                        <span className="object-name">
+                          {item.type === "folder" ? (
+                            <Folder className="folder-icon" size={22} fill="currentColor" />
+                          ) : (
+                            <FileTypeIcon name={item.name} />
+                          )}
+                          {item.name}
+                        </span>
+                        <span>{item.last_modified ? formatCreatedAt(item.last_modified) : ""}</span>
+                        <span>{item.type === "folder" ? "-" : formatBytes(item.size)}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {selectedObject ? (
+                  <aside className="object-details-panel" aria-label="Object details">
+                    <header className="object-details-header">
+                      <FileTypeIcon name={selectedObject.name} />
+                      <strong title={selectedObject.name}>{selectedObject.name}</strong>
+                      <button
+                        type="button"
+                        aria-label="Close object details"
+                        title="Close object details"
+                        onClick={() => setSelectedObject(null)}
+                      >
+                        <X size={20} />
+                      </button>
+                    </header>
+
+                    <section className="object-actions" aria-label="Object actions">
+                      <h3>Actions:</h3>
+                      <button
+                        type="button"
+                        title="Download selected object"
+                        onClick={handleDownloadObject}
+                      >
+                        <Download size={18} /> Download
+                      </button>
+                      <button
+                        type="button"
+                        title="Share selected object"
+                        onClick={() => handleShareObject()}
+                      >
+                        <Share2 size={18} /> Share
+                      </button>
+                      <button
+                        type="button"
+                        title="Preview selected object"
+                        onClick={() => handleShareObject({ openPreview: true })}
+                      >
+                        <Eye size={18} /> Preview
+                      </button>
+                      <button
+                        type="button"
+                        title="Edit object tags"
+                        onClick={handleOpenTags}
+                      >
+                        <Tag size={18} /> Tags
+                      </button>
+                      <button
+                        type="button"
+                        title="Display object versions"
+                        onClick={handleDisplayVersions}
+                      >
+                        <History size={18} /> Display Object Versions
+                      </button>
+                    </section>
+
+                    <button
+                      className="delete-object-button"
+                      type="button"
+                      title="Delete selected object"
+                      onClick={handleDeleteObject}
+                    >
+                      <Trash2 size={20} /> Delete
+                    </button>
+
+                    <section className="object-info">
+                      <div className="details-section-heading">
+                        <h3>Object Info</h3>
+                        <ShoppingBasket size={32} fill="currentColor" aria-hidden="true" />
+                      </div>
+                      <dl>
+                        <div>
+                          <dt>Name:</dt>
+                          <dd>{selectedObject.name}</dd>
+                        </div>
+                        <div>
+                          <dt>Path:</dt>
+                          <dd>{`${selected.name}/${selectedObject.key}`}</dd>
+                        </div>
+                        <div>
+                          <dt>Size:</dt>
+                          <dd>{formatBytes(selectedObject.size)}</dd>
+                        </div>
+                        <div>
+                          <dt>Last Modified:</dt>
+                          <dd>{selectedObject.last_modified ? formatCreatedAt(selectedObject.last_modified) : "Unknown"}</dd>
+                        </div>
+                        <div>
+                          <dt>ETAG:</dt>
+                          <dd>{selectedObject.etag || "N/A"}</dd>
+                        </div>
+                        <div>
+                          <dt>Tags:</dt>
+                          <dd>
+                            {selectedTagEntries.length
+                              ? selectedTagEntries.map(([name, value]) => `${name}=${value}`).join(", ")
+                              : "N/A"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Legal Hold:</dt>
+                          <dd>Off</dd>
+                        </div>
+                        <div>
+                          <dt>Retention Policy:</dt>
+                          <dd>None</dd>
+                        </div>
+                      </dl>
+                    </section>
+
+                    <section className="object-metadata">
+                      <div className="details-section-heading">
+                        <h3>Metadata</h3>
+                        <FileText size={32} aria-hidden="true" />
+                      </div>
+                      <dl>
+                        <div>
+                          <dt>Content-Type</dt>
+                          <dd>{getContentType(selectedObject)}</dd>
+                        </div>
+                        {selectedMetadataEntries.map(([name, value]) => (
+                          <div key={name}>
+                            <dt>{name}</dt>
+                            <dd>{value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </section>
+                  </aside>
+                ) : null}
+              </div>
             </section>
           ) : (
             <section className="bucket-card">
@@ -551,7 +1169,11 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
               </p>
               <p>
                 To get started,{" "}
-                <button className="inline-link" onClick={() => setModalOpen(true)}>
+                <button
+                  className="inline-link"
+                  title="Create a new bucket"
+                  onClick={() => setModalOpen(true)}
+                >
                   Create a Bucket.
                 </button>
               </p>
@@ -565,7 +1187,13 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
       {isModalOpen ? (
         <div className="modal-backdrop" role="presentation">
           <form className="bucket-modal" onSubmit={handleCreateBucket}>
-            <button className="modal-close" type="button" aria-label="Close" onClick={() => setModalOpen(false)}>
+            <button
+              className="modal-close"
+              type="button"
+              aria-label="Close"
+              title="Close dialog"
+              onClick={() => setModalOpen(false)}
+            >
               <X size={42} />
             </button>
             <h2>Create Bucket</h2>
@@ -581,17 +1209,111 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
             {bucketName && !isValidBucketName ? <p className="modal-help invalid">Invalid bucket name</p> : null}
             {status ? <p className="modal-status">{status}</p> : null}
             <div className="modal-actions">
-              <button type="button" onClick={() => {
+              <button type="button" title="Clear bucket name" onClick={() => {
                 setBucketName("");
                 setStatus("");
               }}>Clear</button>
-              <button className="primary" disabled={!canCreate}>
+              <button className="primary" disabled={!canCreate} title="Create bucket">
                 {isCreating ? "Creating..." : "Create Bucket"}
               </button>
             </div>
           </form>
         </div>
       ) : null}
+
+      {isPathModalOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <form className="bucket-modal path-modal" onSubmit={handleCreatePath}>
+            <button
+              className="modal-close"
+              type="button"
+              aria-label="Close"
+              title="Close dialog"
+              onClick={() => setPathModalOpen(false)}
+            >
+              <X size={42} />
+            </button>
+            <h2>
+              <FolderPlus className="path-mark" size={32} aria-hidden="true" />
+              Choose or create a new path
+            </h2>
+            <p className="path-current">
+              <strong>Current Path:</strong>
+              <span>{currentPath}</span>
+            </p>
+            <label>
+              <span>New Folder Path*</span>
+              <input
+                autoFocus
+                value={newFolderPath}
+                onChange={(event) => setNewFolderPath(event.target.value)}
+                placeholder="Enter the new Folder Path"
+              />
+            </label>
+            <div className="modal-actions">
+              <button type="button" title="Clear folder path" onClick={() => setNewFolderPath("")}>Clear</button>
+              <button className="primary" disabled={!canCreatePath} title="Create path">Create</button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {isTagsModalOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <form className="bucket-modal tags-modal" onSubmit={handleSaveTags}>
+            <button
+              className="modal-close"
+              type="button"
+              aria-label="Close"
+              title="Close dialog"
+              onClick={() => setTagsModalOpen(false)}
+            >
+              <X size={42} />
+            </button>
+            <h2>
+              <Tag className="path-mark" size={32} aria-hidden="true" />
+              Object Tags
+            </h2>
+            <p className="path-current">
+              <strong>Object:</strong>
+              <span>{selectedObject?.name}</span>
+            </p>
+            <label>
+              <span>Tags</span>
+              <textarea
+                autoFocus
+                value={tagDraft}
+                onChange={(event) => setTagDraft(event.target.value)}
+                placeholder="department=finance&#10;env=prod"
+              />
+            </label>
+            <p className="modal-help">Use one key=value pair per line.</p>
+            <div className="modal-actions">
+              <button type="button" title="Clear tags" onClick={() => setTagDraft("")}>Clear</button>
+              <button className="primary" disabled={isSavingTags} title="Save object tags">
+                {isSavingTags ? "Saving..." : "Save Tags"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      <input
+        ref={fileInputRef}
+        className="hidden-file-input"
+        type="file"
+        multiple
+        onChange={handleUploadFileChange}
+      />
+      <input
+        ref={folderInputRef}
+        className="hidden-file-input"
+        type="file"
+        multiple
+        webkitdirectory=""
+        directory=""
+        onChange={handleUploadFolderChange}
+      />
     </main>
   );
 }
