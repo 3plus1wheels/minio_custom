@@ -51,11 +51,32 @@ MinIO login:
 - Username: value of `MINIO_ROOT_USER` in `.env`
 - Password: value of `MINIO_ROOT_PASSWORD` in `.env`
 
+Share links use `MINIO_PUBLIC_ENDPOINT` from `.env`. For local development this can be `http://localhost:9000`. For deployment, set it to the public MinIO API origin users can reach, for example:
+
+```env
+MINIO_PUBLIC_ENDPOINT=https://minio.example.com
+```
+
 Do not commit `.env`. It contains the MinIO root credentials and Django signing key.
 
 Compose stores generated data in Docker named volumes:
 
-- `minio_data`: object data
+- `MINIO_DATA_DIR` (default `./minio-data`): object data mounted into MinIO at `/data`
 - `backend_data`: SQLite database
 
-These volumes are not committed to git. Git stores only Docker/Compose config. Docker pulls the MinIO image locally; image layers and bucket data stay outside the repository.
+For production on a dedicated server, set `MINIO_DATA_DIR` to a stable host path such as `/srv/minio/data` or `/mnt/minio-data`. The local `minio-data/` folder is ignored by git. Docker pulls the MinIO image locally; image layers stay outside the repository.
+
+Windows Server production example:
+
+```env
+MINIO_DATA_DIR=D:/minio/data
+```
+
+Create the folder before starting Compose:
+
+```powershell
+mkdir D:\minio\data
+docker compose -f compose.yml up -d --build
+```
+
+Back up the `D:\minio\data` folder. Avoid using `./minio-data` in production because the project folder can move or be replaced during deploys.

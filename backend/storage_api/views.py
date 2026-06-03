@@ -1,4 +1,7 @@
+import mimetypes
+
 from botocore.exceptions import BotoCoreError, ClientError
+from django.conf import settings
 from django.http import FileResponse
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
@@ -14,6 +17,10 @@ def error_response(exc, status_code=status.HTTP_400_BAD_REQUEST):
     else:
         detail = str(exc)
     return Response({"detail": detail}, status=status_code)
+
+
+def guess_content_type(key):
+    return mimetypes.guess_type(key)[0] or "application/octet-stream"
 
 
 class RegisterView(generics.CreateAPIView):
@@ -154,17 +161,32 @@ class ObjectShareView(APIView):
         key = request.query_params.get("key")
         if not key:
             return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        try:
+            expires_in = int(request.query_params.get("expires_in", 12 * 60 * 60))
+        except ValueError:
+            return Response({"detail": "Query parameter 'expires_in' must be an integer."}, status=400)
+
+        expires_in = max(60, min(expires_in, 7 * 24 * 60 * 60))
+        params = {"Bucket": bucket, "Key": key}
+        if request.query_params.get("preview") == "true":
+            filename = key.split("/")[-1] or "preview"
+            params.update(
+                {
+                    "ResponseContentDisposition": f'inline; filename="{filename}"',
+                    "ResponseContentType": guess_content_type(key),
+                }
+            )
 
         try:
-            url = get_s3_client().generate_presigned_url(
+            url = get_s3_client(endpoint_url=settings.MINIO_PUBLIC_ENDPOINT).generate_presigned_url(
                 "get_object",
-                Params={"Bucket": bucket, "Key": key},
-                ExpiresIn=3600,
+                Params=params,
+                ExpiresIn=expires_in,
             )
         except (ClientError, BotoCoreError) as exc:
             return error_response(exc)
 
-        return Response({"url": url, "expires_in": 3600})
+        return Response({"url": url, "expires_in": expires_in})
 
 
 class ObjectTagsView(APIView):

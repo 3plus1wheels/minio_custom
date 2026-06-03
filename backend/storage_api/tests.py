@@ -3,7 +3,7 @@ from io import BytesIO
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
@@ -63,6 +63,7 @@ class StorageApiTests(TestCase):
         s3.delete_bucket.assert_called_once_with(Bucket="new-bucket")
 
     @patch("storage_api.views.get_s3_client")
+    @override_settings(MINIO_PUBLIC_ENDPOINT="https://public.example")
     def test_object_upload_list_download_delete(self, get_s3_client):
         s3 = Mock()
         get_s3_client.return_value = s3
@@ -123,6 +124,23 @@ class StorageApiTests(TestCase):
         share_response = self.client.get(reverse("object-share", kwargs={"bucket": "docs"}), {"key": "notes.txt"})
         self.assertEqual(share_response.status_code, 200)
         self.assertEqual(share_response.data["url"], "https://example.test/share")
+        get_s3_client.assert_any_call(endpoint_url="https://public.example")
+
+        preview_response = self.client.get(
+            reverse("object-share", kwargs={"bucket": "docs"}),
+            {"key": "notes.txt", "preview": "true"},
+        )
+        self.assertEqual(preview_response.status_code, 200)
+        s3.generate_presigned_url.assert_any_call(
+            "get_object",
+            Params={
+                "Bucket": "docs",
+                "Key": "notes.txt",
+                "ResponseContentDisposition": 'inline; filename="notes.txt"',
+                "ResponseContentType": "text/plain",
+            },
+            ExpiresIn=12 * 60 * 60,
+        )
 
         tags_response = self.client.get(reverse("object-tags", kwargs={"bucket": "docs"}), {"key": "notes.txt"})
         self.assertEqual(tags_response.status_code, 200)

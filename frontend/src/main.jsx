@@ -22,6 +22,7 @@ import {
   EyeOff,
   FolderPlus,
   History,
+  Link,
   LockKeyhole,
   User,
   X,
@@ -170,15 +171,20 @@ function normalizeFolderPath(value) {
     .join("/");
 }
 
+function getObjectDisplayName(key = "", prefix = "") {
+  const visibleName = prefix && key.startsWith(prefix) ? key.slice(prefix.length) : key;
+  return visibleName.split("/").filter(Boolean).pop() || key || "Unnamed object";
+}
+
 function getFileExtension(name) {
-  const basename = name.split("/").pop() || "";
+  const basename = String(name || "").split("/").pop() || "";
   const dotIndex = basename.lastIndexOf(".");
   if (dotIndex <= 0 || dotIndex === basename.length - 1) return "";
   return basename.slice(dotIndex + 1).toLowerCase();
 }
 
 function getObjectPath(bucketName, key) {
-  const pathParts = key.split("/").filter(Boolean);
+  const pathParts = String(key || "").split("/").filter(Boolean);
   return [bucketName, ...pathParts].filter(Boolean).join(" / ");
 }
 
@@ -215,6 +221,24 @@ function formatTagLines(tags) {
   return Object.entries(tags || {})
     .map(([name, value]) => `${name}=${value}`)
     .join("\n");
+}
+
+function getShareExpirySeconds(days, hours, minutes) {
+  return Math.max(60, Number(days) * 86400 + Number(hours) * 3600 + Number(minutes) * 60);
+}
+
+function formatShareExpiryTime(expiresAt) {
+  if (!expiresAt) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(new Date(expiresAt));
 }
 
 function FileTypeIcon({ name }) {
@@ -481,10 +505,18 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
   const folderInputRef = useRef(null);
   const [isModalOpen, setModalOpen] = useState(false);
   const [isPathModalOpen, setPathModalOpen] = useState(false);
+  const [isPreviewModalOpen, setPreviewModalOpen] = useState(false);
+  const [isShareModalOpen, setShareModalOpen] = useState(false);
   const [isTagsModalOpen, setTagsModalOpen] = useState(false);
   const [isUploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [bucketName, setBucketName] = useState("");
   const [newFolderPath, setNewFolderPath] = useState("");
+  const [shareDays, setShareDays] = useState(0);
+  const [shareHours, setShareHours] = useState(12);
+  const [shareMinutes, setShareMinutes] = useState(0);
+  const [shareUrl, setShareUrl] = useState("");
+  const [shareExpiresAt, setShareExpiresAt] = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
   const [tagDraft, setTagDraft] = useState("");
   const [buckets, setBuckets] = useState([]);
   const [selectedBucket, setSelectedBucket] = useState("");
@@ -499,6 +531,8 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
   const [isCreating, setCreating] = useState(false);
   const [isLoading, setLoading] = useState(false);
   const [isUploading, setUploading] = useState(false);
+  const [isCreatingShare, setCreatingShare] = useState(false);
+  const [isLoadingPreview, setLoadingPreview] = useState(false);
   const [isSavingTags, setSavingTags] = useState(false);
 
   const normalizedName = bucketName.trim().toLowerCase();
@@ -525,6 +559,8 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
   useEffect(() => {
     setModalOpen(false);
     setPathModalOpen(false);
+    setPreviewModalOpen(false);
+    setShareModalOpen(false);
     setTagsModalOpen(false);
     if (routeBucket) setSelectedBucket(routeBucket);
   }, [routeBucket]);
@@ -579,7 +615,13 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
       setObjects(nextObjects);
       setSelectedObject((current) => {
         if (!current) return null;
-        return nextObjects.find((item) => item.key === current.key) || null;
+        const nextSelected = nextObjects.find((item) => item.key === current.key);
+        if (!nextSelected) return null;
+        return {
+          ...nextSelected,
+          type: "file",
+          name: current.name || getObjectDisplayName(nextSelected.key, currentPrefix),
+        };
       });
       setPendingFolders((folders) =>
         folders.filter((folder) => !nextObjects.some((item) => item.key.startsWith(folder)))
@@ -716,28 +758,70 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     }
   }
 
-  async function handleShareObject({ openPreview = false } = {}) {
+  async function createShareLink() {
     if (!selected || !selectedObject) return;
+    const expiresIn = getShareExpirySeconds(shareDays, shareHours, shareMinutes);
+    setCreatingShare(true);
     try {
-      const data = await shareObject(token, selected.name, selectedObject.key);
-      if (openPreview) {
-        window.open(data.url, "_blank", "noopener,noreferrer");
-        setStatus(`Opened preview for "${selectedObject.name}".`);
-        return;
-      }
-
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(data.url);
-        setStatus(`Share link copied for "${selectedObject.name}".`);
-      } else {
-        setStatus(`Share link: ${data.url}`);
-      }
+      const data = await shareObject(token, selected.name, selectedObject.key, expiresIn);
+      const expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
+      setShareUrl(data.url);
+      setShareExpiresAt(expiresAt);
+      setStatus(`Share link created for "${selectedObject.name}".`);
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
         return;
       }
       setStatus(error.message);
+    } finally {
+      setCreatingShare(false);
+    }
+  }
+
+  async function handleOpenPreview() {
+    if (!selected || !selectedObject) return;
+    setPreviewModalOpen(true);
+    setPreviewUrl("");
+    setLoadingPreview(true);
+    try {
+      const data = await shareObject(token, selected.name, selectedObject.key, 12 * 60 * 60, {
+        preview: true,
+      });
+      setPreviewUrl(data.url);
+      setStatus(`Preview opened for "${selectedObject.name}".`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+      setPreviewModalOpen(false);
+    } finally {
+      setLoadingPreview(false);
+    }
+  }
+
+  async function handleOpenShare() {
+    setShareUrl("");
+    setShareExpiresAt("");
+    setShareDays(0);
+    setShareHours(12);
+    setShareMinutes(0);
+    setShareModalOpen(true);
+  }
+
+  async function handleCopyShareUrl() {
+    if (!shareUrl) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl);
+        setStatus(`Share link copied for "${selectedObject.name}".`);
+      } else {
+        setStatus(`Share link: ${shareUrl}`);
+      }
+    } catch (error) {
+      setStatus("Could not copy share link.");
     }
   }
 
@@ -1054,14 +1138,14 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
                       <button
                         type="button"
                         title="Share selected object"
-                        onClick={() => handleShareObject()}
+                        onClick={handleOpenShare}
                       >
                         <Share2 size={18} /> Share
                       </button>
                       <button
                         type="button"
                         title="Preview selected object"
-                        onClick={() => handleShareObject({ openPreview: true })}
+                        onClick={handleOpenPreview}
                       >
                         <Eye size={18} /> Preview
                       </button>
@@ -1255,6 +1339,133 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
               <button className="primary" disabled={!canCreatePath} title="Create path">Create</button>
             </div>
           </form>
+        </div>
+      ) : null}
+
+      {isPreviewModalOpen ? (
+        <div className="modal-backdrop preview-backdrop" role="presentation">
+          <section className="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+            <button
+              className="modal-close preview-close"
+              type="button"
+              aria-label="Close preview"
+              title="Close preview"
+              onClick={() => setPreviewModalOpen(false)}
+            >
+              <X size={42} />
+            </button>
+            <h2 id="preview-title">
+              <Eye className="preview-title-icon" size={34} aria-hidden="true" />
+              Preview - {selectedObject?.key}
+            </h2>
+            <div className="preview-notice">
+              <strong>File Preview</strong>
+              <p>
+                This is a file preview. If you need to work with the full document,
+                download the file instead.
+              </p>
+              <button type="button" title="Download file" onClick={handleDownloadObject}>
+                Download File
+              </button>
+            </div>
+            <div className="preview-frame-wrap">
+              {isLoadingPreview ? (
+                <div className="preview-loading">Loading preview...</div>
+              ) : (
+                <iframe
+                  src={previewUrl}
+                  title={`Preview ${selectedObject?.name || "object"}`}
+                />
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isShareModalOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="share-modal" role="dialog" aria-modal="true" aria-labelledby="share-title">
+            <button
+              className="modal-close"
+              type="button"
+              aria-label="Close"
+              title="Close dialog"
+              onClick={() => setShareModalOpen(false)}
+            >
+              <X size={42} />
+            </button>
+            <h2 id="share-title">
+              <Share2 className="share-title-icon" size={34} aria-hidden="true" />
+              Share File
+            </h2>
+            <p>
+              The following URL lets you share this object without requiring a login.
+              The URL expires automatically at the earlier of your configured time or the expiration
+              of your current web session.
+            </p>
+
+            <div className="share-duration">
+              <strong>Active for</strong>
+              <label>
+                <input
+                  min="0"
+                  max="7"
+                  type="number"
+                  value={shareDays}
+                  onChange={(event) => setShareDays(event.target.value)}
+                />
+                Days
+              </label>
+              <label>
+                <input
+                  min="0"
+                  max="168"
+                  type="number"
+                  value={shareHours}
+                  onChange={(event) => setShareHours(event.target.value)}
+                />
+                Hours
+              </label>
+              <label>
+                <input
+                  min="0"
+                  max="59"
+                  type="number"
+                  value={shareMinutes}
+                  onChange={(event) => setShareMinutes(event.target.value)}
+                />
+                Minutes
+              </label>
+              <button
+                className="share-generate-button"
+                type="button"
+                disabled={isCreatingShare}
+                title="Create share link"
+                onClick={() => createShareLink()}
+              >
+                {isCreatingShare ? "Creating..." : shareUrl ? "Refresh Link" : "Create Link"}
+              </button>
+            </div>
+
+            <div className="share-expiry">
+              <Link size={20} aria-hidden="true" />
+              <span>Link will be available until:</span>
+              <strong>{shareExpiresAt ? formatShareExpiryTime(shareExpiresAt) : "-"}</strong>
+            </div>
+
+            <div className="share-url-row">
+              <input readOnly value={shareUrl} placeholder="Create a link to share this object" />
+              <button
+                type="button"
+                aria-label="Copy share link"
+                title="Copy share link"
+                disabled={!shareUrl}
+                onClick={handleCopyShareUrl}
+              >
+                <Copy size={24} />
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
 

@@ -85,9 +85,10 @@ export async function downloadObject(token, bucket, key) {
   return response.blob();
 }
 
-export function shareObject(token, bucket, key) {
+export function shareObject(token, bucket, key, expiresIn, { preview = false } = {}) {
+  const previewParam = preview ? "&preview=true" : "";
   return apiRequest(
-    `/buckets/${encodeURIComponent(bucket)}/objects/share/?key=${encodeURIComponent(key)}`,
+    `/buckets/${encodeURIComponent(bucket)}/objects/share/?key=${encodeURIComponent(key)}&expires_in=${encodeURIComponent(expiresIn)}${previewParam}`,
     { token }
   );
 }
