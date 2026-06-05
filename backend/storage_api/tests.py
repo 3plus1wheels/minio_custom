@@ -165,6 +165,14 @@ class StorageApiTests(TestCase):
         self.assertEqual(versions_response.status_code, 200)
         self.assertEqual(versions_response.data["versions"][0]["version_id"], "1")
 
+        rewind_response = self.client.get(
+            reverse("bucket-rewind", kwargs={"bucket": "docs"}),
+            {"rewind_to": modified_at.isoformat()},
+        )
+        self.assertEqual(rewind_response.status_code, 200)
+        self.assertEqual(rewind_response.data["objects"][0]["key"], "notes.txt")
+        self.assertEqual(rewind_response.data["objects"][0]["version_id"], "1")
+
         delete_response = self.client.delete(
             f'{reverse("object-list-create-delete", kwargs={"bucket": "docs"})}?key=notes.txt'
         )

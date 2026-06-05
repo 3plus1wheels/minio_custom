@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   BookOpenText,
+  CheckCircle,
   CircleHelp,
   ClipboardCheck,
   Copy,
@@ -13,7 +14,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Settings,
   ShoppingBasket,
   Tag,
   Trash2,
@@ -40,6 +40,7 @@ import {
   listObjectVersions,
   login,
   register,
+  rewindBucket,
   saveObjectTags,
   shareObject,
   uploadObject,
@@ -61,37 +62,6 @@ function getRoute() {
 function pushRoute(path) {
   window.history.pushState({}, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
-}
-
-const SCALE_OPTIONS = [
-  { label: "75%", value: "0.75" },
-  { label: "90%", value: "0.9" },
-  { label: "100%", value: "1" },
-  { label: "110%", value: "1.1" },
-];
-
-function getInitialScale() {
-  const savedScale = localStorage.getItem("appScale");
-  return SCALE_OPTIONS.some((option) => option.value === savedScale) ? savedScale : "1";
-}
-
-function ScaleControl({ scale, onScaleChange }) {
-  return (
-    <label className="scale-control" title="Interface scale">
-      <Settings size={16} aria-hidden="true" />
-      <select
-        aria-label="Interface scale"
-        value={scale}
-        onChange={(event) => onScaleChange(event.target.value)}
-      >
-        {SCALE_OPTIONS.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
 }
 
 function buildObjectEntries(objects, prefix, filter, pendingFolders = []) {
@@ -202,27 +172,6 @@ function getTagEntries(item) {
   return Object.entries(tags).filter(([, value]) => value !== undefined && value !== null && value !== "");
 }
 
-function parseTagLines(value) {
-  return value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .reduce((tags, line) => {
-      const separatorIndex = line.indexOf("=");
-      if (separatorIndex < 0) return tags;
-      const name = line.slice(0, separatorIndex).trim();
-      const tagValue = line.slice(separatorIndex + 1).trim();
-      if (name) tags[name] = tagValue;
-      return tags;
-    }, {});
-}
-
-function formatTagLines(tags) {
-  return Object.entries(tags || {})
-    .map(([name, value]) => `${name}=${value}`)
-    .join("\n");
-}
-
 function getShareExpirySeconds(days, hours, minutes) {
   return Math.max(60, Number(days) * 86400 + Number(hours) * 3600 + Number(minutes) * 60);
 }
@@ -239,6 +188,11 @@ function formatShareExpiryTime(expiresAt) {
     hour12: false,
     timeZoneName: "short",
   }).format(new Date(expiresAt));
+}
+
+function getDateTimeLocalValue(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
 }
 
 function FileTypeIcon({ name }) {
@@ -332,7 +286,7 @@ function WaveCanvas() {
 
 function App() {
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem("accessToken") || "");
-  const [appScale, setAppScale] = useState(getInitialScale);
+  const accessTokenRef = useRef(accessToken);
   const [route, setRoute] = useState(getRoute);
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
@@ -342,6 +296,10 @@ function App() {
   const [isSubmitting, setSubmitting] = useState(false);
 
   const canSubmit = username.trim() && password.length >= 8 && !isSubmitting;
+
+  useEffect(() => {
+    accessTokenRef.current = accessToken;
+  }, [accessToken]);
 
   useEffect(() => {
     const handleRouteChange = () => setRoute(getRoute());
@@ -355,9 +313,9 @@ function App() {
   }, [accessToken, route.page]);
 
   useEffect(() => {
-    document.documentElement.style.setProperty("--app-scale", appScale);
-    localStorage.setItem("appScale", appScale);
-  }, [appScale]);
+    document.documentElement.style.setProperty("--app-scale", "0.75");
+    localStorage.removeItem("appScale");
+  }, []);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -384,7 +342,9 @@ function App() {
     }
   }
 
-  function handleAuthExpired() {
+  function handleAuthExpired(expiredToken) {
+    if (expiredToken && expiredToken !== accessTokenRef.current) return;
+
     localStorage.removeItem("accessToken");
     localStorage.removeItem("refreshToken");
     setAccessToken("");
@@ -396,11 +356,9 @@ function App() {
   if (accessToken) {
     return (
       <ObjectBrowser
-        appScale={appScale}
         routeBucket={route.bucket}
         token={accessToken}
-        onAuthExpired={handleAuthExpired}
-        onScaleChange={setAppScale}
+        onAuthExpired={() => handleAuthExpired(accessToken)}
         onSelectBucket={(bucket) => pushRoute(`/browser/${encodeURIComponent(bucket)}`)}
         onSignOut={() => {
           localStorage.removeItem("accessToken");
@@ -428,8 +386,6 @@ function App() {
       </section>
 
       <section className="auth-panel" aria-label="Authentication">
-        <ScaleControl scale={appScale} onScaleChange={setAppScale} />
-
         <div className="brand-lockup">
           <div className="brand-minio">MINIO</div>
           <div className="brand-title">OBJECT <span>STORE</span></div>
@@ -500,14 +456,16 @@ function App() {
   );
 }
 
-function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleChange, onSelectBucket, onSignOut }) {
+function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSignOut }) {
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const [isModalOpen, setModalOpen] = useState(false);
   const [isPathModalOpen, setPathModalOpen] = useState(false);
   const [isPreviewModalOpen, setPreviewModalOpen] = useState(false);
+  const [isRewindModalOpen, setRewindModalOpen] = useState(false);
   const [isShareModalOpen, setShareModalOpen] = useState(false);
   const [isTagsModalOpen, setTagsModalOpen] = useState(false);
+  const [isTransfersOpen, setTransfersOpen] = useState(false);
   const [isUploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [bucketName, setBucketName] = useState("");
   const [newFolderPath, setNewFolderPath] = useState("");
@@ -516,14 +474,36 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
   const [shareMinutes, setShareMinutes] = useState(0);
   const [shareUrl, setShareUrl] = useState("");
   const [shareExpiresAt, setShareExpiresAt] = useState("");
+  const [rewindDate, setRewindDate] = useState(() => {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    return getDateTimeLocalValue(startOfDay);
+  });
+  const [isRewindEnabled, setRewindEnabled] = useState(true);
   const [previewUrl, setPreviewUrl] = useState("");
-  const [tagDraft, setTagDraft] = useState("");
+  const [previewTarget, setPreviewTarget] = useState(null);
+  const [previewVersionId, setPreviewVersionId] = useState("");
+  const [shareTarget, setShareTarget] = useState(null);
+  const [shareVersionId, setShareVersionId] = useState("");
+  const [tagKey, setTagKey] = useState("");
+  const [tagLabel, setTagLabel] = useState("");
+  const [currentTags, setCurrentTags] = useState({});
   const [buckets, setBuckets] = useState([]);
   const [selectedBucket, setSelectedBucket] = useState("");
   const [objects, setObjects] = useState([]);
+  const [rewindObjects, setRewindObjects] = useState([]);
+  const [isRewindMode, setRewindMode] = useState(false);
+  const [rewindAppliedAt, setRewindAppliedAt] = useState("");
+  const [versionItems, setVersionItems] = useState([]);
+  const [isVersionsMode, setVersionsMode] = useState(false);
+  const [isVersionMultiSelect, setVersionMultiSelect] = useState(false);
+  const [selectedVersionIds, setSelectedVersionIds] = useState([]);
+  const [versionSort, setVersionSort] = useState("date");
   const [currentPrefix, setCurrentPrefix] = useState("");
   const [selectedObject, setSelectedObject] = useState(null);
+  const [selectedEntryKeys, setSelectedEntryKeys] = useState([]);
   const [pendingFolders, setPendingFolders] = useState([]);
+  const [transfers, setTransfers] = useState([]);
   const [bucketFilter, setBucketFilter] = useState("");
   const [objectFilter, setObjectFilter] = useState("");
   const [status, setStatus] = useState("");
@@ -534,6 +514,8 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
   const [isCreatingShare, setCreatingShare] = useState(false);
   const [isLoadingPreview, setLoadingPreview] = useState(false);
   const [isSavingTags, setSavingTags] = useState(false);
+  const [isLoadingVersions, setLoadingVersions] = useState(false);
+  const [isLoadingRewind, setLoadingRewind] = useState(false);
 
   const normalizedName = bucketName.trim().toLowerCase();
   const normalizedFolderPath = normalizeFolderPath(newFolderPath);
@@ -544,32 +526,114 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     bucket.name.toLowerCase().includes(bucketFilter.trim().toLowerCase())
   );
   const selected = buckets.find((bucket) => bucket.name === selectedBucket);
-  const objectEntries = buildObjectEntries(objects, currentPrefix, objectFilter, pendingFolders);
-  const objectCount = objects.length;
-  const totalSize = objects.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+  const activeObjects = isRewindMode ? rewindObjects : objects;
+  const objectEntries = buildObjectEntries(activeObjects, currentPrefix, objectFilter, isRewindMode ? [] : pendingFolders);
+  const visibleEntryKeys = objectEntries.map((item) => item.key);
+  const visibleEntryKeySignature = visibleEntryKeys.join("\u0000");
+  const selectedEntryCount = selectedEntryKeys.length;
+  const selectedEntries = objectEntries.filter((item) => selectedEntryKeys.includes(item.key));
+  const selectedFileEntries = selectedEntries.filter((item) => item.type !== "folder");
+  const selectedSingleFile = selectedFileEntries.length === 1 && selectedEntries.length === 1 ? selectedFileEntries[0] : null;
+  const hasObjectSidePanel = Boolean(selectedObject) || selectedEntryCount > 0;
+  const areAllVisibleEntriesSelected =
+    visibleEntryKeys.length > 0 && visibleEntryKeys.every((key) => selectedEntryKeys.includes(key));
+  const objectCount = activeObjects.length;
+  const totalSize = activeObjects.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
   const currentPath = currentPrefix ? `${selected?.name || ""} / ${currentPrefix.split("/").filter(Boolean).join(" / ")}` : selected?.name;
   const displayedPath = selectedObject ? getObjectPath(selected?.name || "", selectedObject.key) : currentPath;
+  const displayedPathLabel = isVersionsMode && selectedObject
+    ? `${selected?.name || ""} / ${selectedObject.key} - Versions`
+    : displayedPath;
   const selectedMetadataEntries = selectedObject ? getMetadataEntries(selectedObject) : [];
   const selectedTagEntries = selectedObject ? getTagEntries(selectedObject) : [];
+  const activeTransferCount = transfers.length;
+  const sortedVersionItems = [...versionItems].sort((a, b) => {
+    if (versionSort === "size") return (Number(b.size) || 0) - (Number(a.size) || 0);
+    return new Date(b.last_modified || 0).getTime() - new Date(a.last_modified || 0).getTime();
+  });
+  const versionTotalSize = versionItems.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+  const selectedVersionCount = selectedVersionIds.length;
+
+  function closeModals() {
+    setModalOpen(false);
+    setPathModalOpen(false);
+    setPreviewModalOpen(false);
+    setRewindModalOpen(false);
+    setShareModalOpen(false);
+    setTagsModalOpen(false);
+    setPreviewUrl("");
+    setPreviewTarget(null);
+    setPreviewVersionId("");
+  }
+
+  function addTransfer(item) {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setTransfers((current) => [{ id, progress: 15, status: "active", ...item }, ...current]);
+    setTransfersOpen(true);
+    return id;
+  }
+
+  function updateTransfer(id, updates) {
+    setTransfers((current) =>
+      current.map((item) => (item.id === id ? { ...item, ...updates } : item))
+    );
+  }
+
+  function removeTransfer(id) {
+    setTransfers((current) => current.filter((item) => item.id !== id));
+  }
 
   useEffect(() => {
     refreshBuckets();
   }, []);
 
   useEffect(() => {
-    setModalOpen(false);
-    setPathModalOpen(false);
+    closeModals();
+    if (routeBucket) setSelectedBucket(routeBucket);
+  }, [routeBucket]);
+
+  useEffect(() => {
+    if (selectedObject) return;
     setPreviewModalOpen(false);
     setShareModalOpen(false);
     setTagsModalOpen(false);
-    if (routeBucket) setSelectedBucket(routeBucket);
-  }, [routeBucket]);
+    setPreviewUrl("");
+    setPreviewTarget(null);
+    setPreviewVersionId("");
+    setShareTarget(null);
+    setShareVersionId("");
+    setVersionsMode(false);
+    setVersionItems([]);
+    setVersionMultiSelect(false);
+    setSelectedVersionIds([]);
+    setSelectedEntryKeys([]);
+    setRewindMode(false);
+    setRewindObjects([]);
+    setRewindAppliedAt("");
+  }, [selectedObject]);
+
+  useEffect(() => {
+    const handleEscape = (event) => {
+      if (event.key === "Escape") closeModals();
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, []);
 
   useEffect(() => {
     if (selectedBucket) refreshObjects(selectedBucket);
     else setObjects([]);
     setCurrentPrefix("");
     setSelectedObject(null);
+    setVersionsMode(false);
+    setVersionItems([]);
+    setVersionMultiSelect(false);
+    setSelectedVersionIds([]);
+    setSelectedEntryKeys([]);
+    setRewindMode(false);
+    setRewindObjects([]);
+    setRewindAppliedAt("");
     setPendingFolders([]);
     setPathCopied(false);
   }, [selectedBucket]);
@@ -579,6 +643,10 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     const timeoutId = window.setTimeout(() => setPathCopied(false), 1600);
     return () => window.clearTimeout(timeoutId);
   }, [isPathCopied]);
+
+  useEffect(() => {
+    setSelectedEntryKeys((keys) => keys.filter((key) => visibleEntryKeys.includes(key)));
+  }, [visibleEntryKeySignature]);
 
   async function refreshBuckets() {
     setLoading(true);
@@ -637,6 +705,46 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     }
   }
 
+  function clearRewindData() {
+    setRewindMode(false);
+    setRewindObjects([]);
+    setRewindAppliedAt("");
+    setSelectedEntryKeys([]);
+  }
+
+  function handleOpenRewind() {
+    if (!selected) return;
+    setRewindModalOpen(true);
+  }
+
+  async function handleShowRewindData() {
+    if (!selected || !rewindDate || !isRewindEnabled) return;
+    setLoadingRewind(true);
+    setStatus("");
+    try {
+      const rewindTo = new Date(rewindDate).toISOString();
+      const data = await rewindBucket(token, selected.name, rewindTo);
+      const nextObjects = data.objects || [];
+      setRewindObjects(nextObjects);
+      setRewindAppliedAt(data.rewind_to || rewindTo);
+      setRewindMode(true);
+      setSelectedObject(null);
+      setVersionsMode(false);
+      setVersionItems([]);
+      setSelectedEntryKeys([]);
+      setRewindModalOpen(false);
+      setStatus(`Showing rewind data for "${selected.name}" at ${formatCreatedAt(data.rewind_to || rewindTo)}.`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    } finally {
+      setLoadingRewind(false);
+    }
+  }
+
   async function handleCreateBucket(event) {
     event.preventDefault();
     setCreating(true);
@@ -673,7 +781,13 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     try {
       for (const file of files) {
         const key = `${currentPrefix}${file.webkitRelativePath || file.name}`;
+        const transferId = addTransfer({
+          bucket: selected.name,
+          name: file.name,
+          type: "upload",
+        });
         await uploadObject(token, selected.name, file, key);
+        updateTransfer(transferId, { progress: 100, status: "done" });
       }
       setStatus(`Uploaded ${files.length} file${files.length === 1 ? "" : "s"}.`);
       await refreshObjects(selected.name);
@@ -736,20 +850,29 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     }
   }
 
-  async function handleDownloadObject() {
-    if (!selected || !selectedObject) return;
+  async function handleDownloadObject(targetObject = selectedObject, versionId = "") {
+    if (!selected || !targetObject) return;
+    const effectiveVersionId = versionId || targetObject.version_id || "";
+    const transferId = addTransfer({
+      bucket: selected.name,
+      name: targetObject.name,
+      type: "download",
+    });
     try {
-      const blob = await downloadObject(token, selected.name, selectedObject.key);
+      const blob = await downloadObject(token, selected.name, targetObject.key, effectiveVersionId);
+      updateTransfer(transferId, { progress: 80 });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = selectedObject.name;
+      link.download = targetObject.name;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      setStatus(`Downloading "${selectedObject.name}".`);
+      updateTransfer(transferId, { progress: 100, status: "done" });
+      setStatus(`Downloading "${targetObject.name}".`);
     } catch (error) {
+      updateTransfer(transferId, { progress: 100, status: "error" });
       if (error.status === 401) {
         onAuthExpired();
         return;
@@ -759,15 +882,18 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
   }
 
   async function createShareLink() {
-    if (!selected || !selectedObject) return;
+    const targetObject = shareTarget || selectedObject;
+    if (!selected || !targetObject) return;
     const expiresIn = getShareExpirySeconds(shareDays, shareHours, shareMinutes);
     setCreatingShare(true);
     try {
-      const data = await shareObject(token, selected.name, selectedObject.key, expiresIn);
+      const data = await shareObject(token, selected.name, targetObject.key, expiresIn, {
+        versionId: shareVersionId || targetObject.version_id || "",
+      });
       const expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
       setShareUrl(data.url);
       setShareExpiresAt(expiresAt);
-      setStatus(`Share link created for "${selectedObject.name}".`);
+      setStatus(`Share link created for "${targetObject.name}".`);
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -779,17 +905,21 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     }
   }
 
-  async function handleOpenPreview() {
-    if (!selected || !selectedObject) return;
+  async function handleOpenPreview(targetObject = selectedObject, versionId = "") {
+    if (!selected || !targetObject) return;
+    const effectiveVersionId = versionId || targetObject.version_id || "";
+    setPreviewTarget(targetObject);
+    setPreviewVersionId(effectiveVersionId);
     setPreviewModalOpen(true);
     setPreviewUrl("");
     setLoadingPreview(true);
     try {
-      const data = await shareObject(token, selected.name, selectedObject.key, 12 * 60 * 60, {
+      const data = await shareObject(token, selected.name, targetObject.key, 12 * 60 * 60, {
         preview: true,
+        versionId: effectiveVersionId,
       });
       setPreviewUrl(data.url);
-      setStatus(`Preview opened for "${selectedObject.name}".`);
+      setStatus(`Preview opened for "${targetObject.name}".`);
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -802,7 +932,9 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     }
   }
 
-  async function handleOpenShare() {
+  async function handleOpenShare(targetObject = selectedObject, versionId = "") {
+    setShareTarget(targetObject);
+    setShareVersionId(versionId || targetObject?.version_id || "");
     setShareUrl("");
     setShareExpiresAt("");
     setShareDays(0);
@@ -816,7 +948,7 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(shareUrl);
-        setStatus(`Share link copied for "${selectedObject.name}".`);
+        setStatus(`Share link copied for "${(shareTarget || selectedObject)?.name}".`);
       } else {
         setStatus(`Share link: ${shareUrl}`);
       }
@@ -829,7 +961,9 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     if (!selected || !selectedObject) return;
     try {
       const data = await getObjectTags(token, selected.name, selectedObject.key);
-      setTagDraft(formatTagLines(data.tags));
+      setCurrentTags(data.tags || {});
+      setTagKey("");
+      setTagLabel("");
       setTagsModalOpen(true);
     } catch (error) {
       if (error.status === 401) {
@@ -843,16 +977,50 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
   async function handleSaveTags(event) {
     event.preventDefault();
     if (!selected || !selectedObject) return;
+    const nextKey = tagKey.trim();
+    const nextLabel = tagLabel.trim();
+    if (!nextKey || !nextLabel) return;
+
     setSavingTags(true);
     try {
-      const tags = parseTagLines(tagDraft);
+      const tags = { ...currentTags, [nextKey]: nextLabel };
       const data = await saveObjectTags(token, selected.name, selectedObject.key, tags);
+      setCurrentTags(data.tags || {});
       setObjects((items) =>
         items.map((item) => (item.key === selectedObject.key ? { ...item, tags: data.tags } : item))
       );
       setSelectedObject((item) => (item ? { ...item, tags: data.tags } : item));
-      setTagsModalOpen(false);
+      setTagKey("");
+      setTagLabel("");
       setStatus(`Tags saved for "${selectedObject.name}".`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    } finally {
+      setSavingTags(false);
+    }
+  }
+
+  function handleClearTagForm() {
+    setTagKey("");
+    setTagLabel("");
+  }
+
+  async function handleRemoveTag(tagName) {
+    if (!selected || !selectedObject) return;
+    const { [tagName]: _removed, ...nextTags } = currentTags;
+    setSavingTags(true);
+    try {
+      const data = await saveObjectTags(token, selected.name, selectedObject.key, nextTags);
+      setCurrentTags(data.tags || {});
+      setObjects((items) =>
+        items.map((item) => (item.key === selectedObject.key ? { ...item, tags: data.tags } : item))
+      );
+      setSelectedObject((item) => (item ? { ...item, tags: data.tags } : item));
+      setStatus(`Removed tag "${tagName}" from "${selectedObject.name}".`);
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -866,14 +1034,173 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
 
   async function handleDisplayVersions() {
     if (!selected || !selectedObject) return;
+    setLoadingVersions(true);
     try {
       const data = await listObjectVersions(token, selected.name, selectedObject.key);
-      const count = data.versions?.length || 0;
+      const nextVersions = (data.versions || []).map((item, index) => ({
+        ...item,
+        ordinal: (data.versions || []).length - index,
+      }));
+      setVersionItems(nextVersions);
+      setVersionsMode(true);
+      setVersionMultiSelect(false);
+      setSelectedVersionIds([]);
       setStatus(
-        count
-          ? `${count} version${count === 1 ? "" : "s"} found for "${selectedObject.name}".`
+        nextVersions.length
+          ? `${nextVersions.length} version${nextVersions.length === 1 ? "" : "s"} found for "${selectedObject.name}".`
           : `No object versions found for "${selectedObject.name}".`
       );
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    } finally {
+      setLoadingVersions(false);
+    }
+  }
+
+  function handleHideVersions() {
+    setVersionsMode(false);
+    setVersionItems([]);
+    setVersionMultiSelect(false);
+    setSelectedVersionIds([]);
+  }
+
+  function handlePathBack() {
+    if (isVersionsMode) {
+      handleHideVersions();
+      return;
+    }
+    if (selectedObject) {
+      setSelectedObject(null);
+      return;
+    }
+    setSelectedEntryKeys([]);
+    setCurrentPrefix((prefix) => getParentPrefix(prefix));
+  }
+
+  function toggleEntrySelection(key) {
+    setSelectedEntryKeys((keys) =>
+      keys.includes(key) ? keys.filter((item) => item !== key) : [...keys, key]
+    );
+  }
+
+  function toggleAllVisibleEntries() {
+    setSelectedEntryKeys((keys) => {
+      if (areAllVisibleEntriesSelected) {
+        return keys.filter((key) => !visibleEntryKeys.includes(key));
+      }
+      return Array.from(new Set([...keys, ...visibleEntryKeys]));
+    });
+  }
+
+  function openObjectEntry(item) {
+    setSelectedEntryKeys([]);
+    if (item.type === "folder") {
+      setSelectedObject(null);
+      setVersionsMode(false);
+      setVersionItems([]);
+      setCurrentPrefix(item.key);
+      return;
+    }
+    setSelectedObject(item);
+    setVersionsMode(false);
+    setVersionItems([]);
+  }
+
+  async function handleDeleteSelectedEntries() {
+    if (!selected || selectedEntryKeys.length === 0) return;
+    const count = selectedEntries.length;
+    if (!window.confirm(`Delete ${count} selected item${count === 1 ? "" : "s"}? Folder selections delete all objects inside.`)) return;
+
+    const objectKeys = new Set();
+    const objectVersions = [];
+    const pendingFolderKeys = new Set();
+    for (const entry of selectedEntries) {
+      if (entry.type === "folder") {
+        const folderObjects = activeObjects.filter((item) => item.key.startsWith(entry.key));
+        if (folderObjects.length === 0) pendingFolderKeys.add(entry.key);
+        folderObjects.forEach((item) => {
+          objectKeys.add(item.key);
+          objectVersions.push({ key: item.key, versionId: isRewindMode ? item.version_id || "" : "" });
+        });
+      } else {
+        objectKeys.add(entry.key);
+        objectVersions.push({ key: entry.key, versionId: isRewindMode ? entry.version_id || "" : "" });
+      }
+    }
+
+    try {
+      for (const item of objectVersions) {
+        await deleteObject(token, selected.name, item.key, item.versionId);
+      }
+      if (pendingFolderKeys.size) {
+        setPendingFolders((folders) => folders.filter((key) => !pendingFolderKeys.has(key)));
+      }
+      setSelectedEntryKeys([]);
+      if (selectedObject && objectKeys.has(selectedObject.key)) setSelectedObject(null);
+      setStatus(`Deleted ${count} selected item${count === 1 ? "" : "s"}.`);
+      if (objectKeys.size) await refreshObjects(selected.name);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleDownloadSelectedEntries() {
+    if (!selected || selectedEntries.length === 0) return;
+    const downloadTargets = [];
+    for (const entry of selectedEntries) {
+      if (entry.type === "folder") {
+        activeObjects
+          .filter((item) => item.key.startsWith(entry.key))
+          .forEach((item) =>
+            downloadTargets.push({
+              ...item,
+              name: getObjectDisplayName(item.key, currentPrefix),
+            })
+          );
+      } else {
+        downloadTargets.push(entry);
+      }
+    }
+    for (const item of downloadTargets) {
+      await handleDownloadObject(item, isRewindMode ? item.version_id || "" : "");
+    }
+  }
+
+  function toggleVersionMultiSelect() {
+    setVersionMultiSelect((enabled) => {
+      if (enabled) setSelectedVersionIds([]);
+      return !enabled;
+    });
+  }
+
+  function toggleSelectedVersion(versionId) {
+    if (!versionId) return;
+    setSelectedVersionIds((ids) =>
+      ids.includes(versionId) ? ids.filter((id) => id !== versionId) : [...ids, versionId]
+    );
+  }
+
+  async function handleDeleteSelectedVersions() {
+    if (!selected || !selectedObject || selectedVersionIds.length === 0) return;
+    const count = selectedVersionIds.length;
+    if (!window.confirm(`Delete ${count} selected version${count === 1 ? "" : "s"}? This cannot be undone.`)) return;
+
+    try {
+      for (const versionId of selectedVersionIds) {
+        await deleteObject(token, selected.name, selectedObject.key, versionId);
+      }
+      setVersionItems((items) => items.filter((item) => !selectedVersionIds.includes(item.version_id || "")));
+      setSelectedVersionIds([]);
+      setStatus(`Deleted ${count} selected version${count === 1 ? "" : "s"}.`);
+      await refreshObjects(selected.name);
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -888,8 +1215,13 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
     const objectName = selectedObject.name;
     if (!window.confirm(`Delete "${objectName}"? This cannot be undone.`)) return;
     try {
-      await deleteObject(token, selected.name, selectedObject.key);
+      await deleteObject(token, selected.name, selectedObject.key, isRewindMode ? selectedObject.version_id || "" : "");
       setObjects((items) => items.filter((item) => item.key !== selectedObject.key));
+      if (isRewindMode) {
+        setRewindObjects((items) =>
+          items.filter((item) => !(item.key === selectedObject.key && item.version_id === selectedObject.version_id))
+        );
+      }
       setSelectedObject(null);
       setStatus(`Deleted "${objectName}".`);
     } catch (error) {
@@ -971,9 +1303,70 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
             </label>
           ) : null}
           <div className="header-actions">
-            <ScaleControl scale={appScale} onScaleChange={onScaleChange} />
             <button aria-label="Help" title="Help"><CircleHelp size={20} /></button>
             <button aria-label="Toggle dark mode" title="Toggle dark mode"><Moon size={20} /></button>
+            <div className="transfers-wrap">
+              <button
+                aria-label="Downloads and uploads"
+                className="transfers-button"
+                title="Downloads and uploads"
+                onClick={() => setTransfersOpen((value) => !value)}
+              >
+                <Download size={22} />
+                <Upload size={22} />
+                {activeTransferCount ? <span /> : null}
+              </button>
+              {isTransfersOpen ? (
+                <section className="transfers-panel" aria-label="Downloads and uploads">
+                  <header>
+                    <h2>Downloads / Uploads</h2>
+                    <button
+                      type="button"
+                      aria-label="Close transfers"
+                      title="Close transfers"
+                      onClick={() => setTransfersOpen(false)}
+                    >
+                      <X size={16} />
+                    </button>
+                  </header>
+                  <div className="transfers-list">
+                    {transfers.length ? (
+                      transfers.map((item) => (
+                        <article className="transfer-item" key={item.id}>
+                          <div className="transfer-title-row">
+                            {item.status === "done" ? (
+                              <CheckCircle size={24} />
+                            ) : (
+                              <Upload size={24} />
+                            )}
+                            <div>
+                              <strong>{item.name}</strong>
+                              <p><b>Bucket:</b> {item.bucket}</p>
+                            </div>
+                            <button
+                              type="button"
+                              aria-label={`Remove ${item.name} from transfers`}
+                              title="Remove transfer"
+                              onClick={() => removeTransfer(item.id)}
+                            >
+                              <X size={20} />
+                            </button>
+                          </div>
+                          <div className="transfer-progress-row">
+                            <div>
+                              <span style={{ width: `${item.progress}%` }} />
+                            </div>
+                            <strong>{item.progress}%</strong>
+                          </div>
+                        </article>
+                      ))
+                    ) : (
+                      <p className="empty-transfers">No downloads or uploads yet.</p>
+                    )}
+                  </div>
+                </section>
+              ) : null}
+            </div>
           </div>
         </header>
 
@@ -993,9 +1386,19 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
                   </div>
                 </div>
                 <div className="bucket-toolbar">
-                  <button disabled title="Restore earlier object versions">Rewind <RefreshCw size={18} /></button>
                   <button
-                    onClick={() => refreshObjects(selected.name)}
+                    type="button"
+                    className={isRewindMode ? "active-rewind-button" : ""}
+                    title={isRewindMode ? "Viewing rewind data" : "Show bucket data from an earlier time"}
+                    onClick={handleOpenRewind}
+                  >
+                    Rewind <RefreshCw size={18} />
+                  </button>
+                  <button
+                    onClick={() => {
+                      clearRewindData();
+                      refreshObjects(selected.name);
+                    }}
                     title="Reload objects in this bucket"
                   >
                     Refresh <RefreshCw size={18} />
@@ -1035,19 +1438,16 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
                 </div>
               </header>
 
-              <div className={selectedObject ? "path-row path-row-with-panel" : "path-row"}>
+              <div className={hasObjectSidePanel ? "path-row path-row-with-panel" : "path-row"}>
                 <button
                   aria-label="Back"
-                  title="Go to parent path"
-                  disabled={!currentPrefix}
-                  onClick={() => {
-                    setSelectedObject(null);
-                    setCurrentPrefix((prefix) => getParentPrefix(prefix));
-                  }}
+                  title={isVersionsMode ? "Back to object list" : selectedObject ? "Back to object list" : "Go to parent path"}
+                  disabled={!isVersionsMode && !selectedObject && !currentPrefix}
+                  onClick={handlePathBack}
                 >
                   ‹
                 </button>
-                <div>{displayedPath}</div>
+                <div>{displayedPathLabel}</div>
                 <button
                   aria-label={isPathCopied ? "Path copied" : "Copy path"}
                   title={isPathCopied ? "Path copied" : "Copy path"}
@@ -1059,59 +1459,286 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
                   aria-label="Create new path"
                   className="path-create-button"
                   title="Create a folder-like path in this bucket"
+                  disabled={selectedEntryCount > 0}
                   onClick={() => setPathModalOpen(true)}
                 >
                   Create new path <FolderPlus size={18} />
                 </button>
               </div>
 
-              <div className={selectedObject ? "object-workspace has-object-panel" : "object-workspace"}>
-                {objectEntries.length === 0 ? (
+              <div className={hasObjectSidePanel ? "object-workspace has-object-panel" : "object-workspace"}>
+                {isVersionsMode && selectedObject ? (
+                  <section className="versions-view" aria-label={`${selectedObject.name} versions`}>
+                    <header className="versions-heading">
+                      <div className="versions-title">
+                        <History size={30} fill="currentColor" aria-hidden="true" />
+                        <div>
+                          <h3>{selectedObject.name} Versions</h3>
+                          <p>
+                            {versionItems.length} Version{versionItems.length === 1 ? "" : "s"}
+                            <span>{formatBytes(versionTotalSize)}</span>
+                          </p>
+                        </div>
+                      </div>
+                      <div className="versions-toolbar">
+                        <button
+                          type="button"
+                          className={isVersionMultiSelect ? "active" : ""}
+                          title={isVersionMultiSelect ? "Exit multiple select" : "Select multiple versions"}
+                          onClick={toggleVersionMultiSelect}
+                        >
+                          <span aria-hidden="true">▦</span>
+                        </button>
+                        <button
+                          type="button"
+                          title={selectedVersionCount ? `Delete ${selectedVersionCount} selected version${selectedVersionCount === 1 ? "" : "s"}` : "Select versions to delete"}
+                          disabled={!selectedVersionCount}
+                          onClick={handleDeleteSelectedVersions}
+                        >
+                          <Trash2 size={22} />
+                        </button>
+                        <button type="button" title="Timeline version layout">
+                          <History size={22} />
+                        </button>
+                        <label>
+                          Sort by
+                          <select value={versionSort} onChange={(event) => setVersionSort(event.target.value)}>
+                            <option value="date">Date</option>
+                            <option value="size">Size</option>
+                          </select>
+                        </label>
+                      </div>
+                    </header>
+
+                    {isLoadingVersions ? (
+                      <p className="empty-location">Loading versions...</p>
+                    ) : sortedVersionItems.length ? (
+                      <div className="versions-timeline">
+                        {sortedVersionItems.map((version, index) => {
+                          const versionNumber = sortedVersionItems.length - index;
+                          const versionId = version.version_id || "";
+                          const isNullVersion = versionId === "null" || !versionId;
+                          const canOpenVersion = !version.is_delete_marker;
+                          const isChecked = selectedVersionIds.includes(versionId);
+                          return (
+                            <article
+                              className={[
+                                "version-row",
+                                isVersionMultiSelect ? "with-select" : "",
+                                isChecked ? "selected" : "",
+                              ].filter(Boolean).join(" ")}
+                              key={`${versionId}-${index}`}
+                            >
+                              {isVersionMultiSelect ? (
+                                <label className="version-select">
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    disabled={!versionId}
+                                    aria-label={`Select version ${versionNumber}`}
+                                    onChange={() => toggleSelectedVersion(versionId)}
+                                  />
+                                </label>
+                              ) : null}
+                              <div className="version-main">
+                                <FileTypeIcon name={selectedObject.name} />
+                                <div>
+                                  <h4>
+                                    v{versionNumber}
+                                    {version.is_latest ? <span className="current-version-badge">CURRENT VERSION</span> : null}
+                                    {isNullVersion ? <span className="null-version-badge">NULL VERSION</span> : null}
+                                    {version.is_delete_marker ? <span className="null-version-badge">DELETE MARKER</span> : null}
+                                  </h4>
+                                  <p className="version-id">{versionId || "-"}</p>
+                                  <p className="version-meta">
+                                    <strong>Last modified:</strong> {version.last_modified ? formatCreatedAt(version.last_modified) : "Unknown"}
+                                    <strong>Size:</strong> {formatBytes(version.size)}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="version-actions">
+                                <button
+                                  type="button"
+                                  aria-label={`Preview version ${versionNumber}`}
+                                  title="Preview this version"
+                                  disabled={!canOpenVersion}
+                                  onClick={() => handleOpenPreview(selectedObject, versionId)}
+                                >
+                                  <Eye size={18} />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`Download version ${versionNumber}`}
+                                  title="Download this version"
+                                  disabled={!canOpenVersion}
+                                  onClick={() => handleDownloadObject(selectedObject, versionId)}
+                                >
+                                  <Download size={18} />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`Share version ${versionNumber}`}
+                                  title="Share this version"
+                                  disabled={!canOpenVersion}
+                                  onClick={() => handleOpenShare(selectedObject, versionId)}
+                                >
+                                  <Share2 size={18} />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`Restore version ${versionNumber}`}
+                                  title="Restore version is not available yet"
+                                  disabled
+                                >
+                                  <RefreshCw size={18} />
+                                </button>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="empty-location">No versions found for this object.</p>
+                    )}
+                  </section>
+                ) : objectEntries.length === 0 ? (
                   <p className="empty-location">
                     {isLoading ? "Loading..." : "This location is empty, please try uploading a new file"}
                   </p>
                 ) : (
                   <div className="object-table">
                     <div className="object-row object-row-header">
+                      <label className="object-select-cell">
+                        <input
+                          type="checkbox"
+                          checked={areAllVisibleEntriesSelected}
+                          aria-label="Select all visible files and folders"
+                          onChange={toggleAllVisibleEntries}
+                        />
+                      </label>
                       <span>Name</span>
-                      <span>Last Modified</span>
+                      <span>{selectedEntryCount || isRewindMode ? "Object Date" : "Last Modified"}</span>
                       <span>Size</span>
+                      <span>Deleted</span>
                     </div>
+                    {isRewindMode ? (
+                      <div className="rewind-table-banner">
+                        <span>Rewind: {formatCreatedAt(rewindAppliedAt)}</span>
+                        <button type="button" onClick={clearRewindData}>Show current data</button>
+                      </div>
+                    ) : null}
                     {objectEntries.map((item) => (
-                      <button
+                      <div
                         className={[
                           "object-row",
                           item.type === "folder" ? "folder-row" : "file-row",
                           selectedObject?.key === item.key ? "selected" : "",
+                          selectedEntryKeys.includes(item.key) ? "checked" : "",
                         ].filter(Boolean).join(" ")}
                         key={item.key}
-                        type="button"
-                        title={item.type === "folder" ? `Open folder ${item.name}` : `View details for ${item.name}`}
-                        onClick={() => {
-                          if (item.type === "folder") {
-                            setSelectedObject(null);
-                            setCurrentPrefix(item.key);
-                            return;
-                          }
-                          setSelectedObject(item);
-                        }}
                       >
-                        <span className="object-name">
+                        <label className="object-select-cell">
+                          <input
+                            type="checkbox"
+                            checked={selectedEntryKeys.includes(item.key)}
+                            aria-label={`Select ${item.name}`}
+                            onChange={() => toggleEntrySelection(item.key)}
+                          />
+                        </label>
+                        <button
+                          className="object-open-button object-name"
+                          type="button"
+                          title={item.type === "folder" ? `Open folder ${item.name}` : `View details for ${item.name}`}
+                          onClick={() => openObjectEntry(item)}
+                        >
                           {item.type === "folder" ? (
                             <Folder className="folder-icon" size={22} fill="currentColor" />
                           ) : (
                             <FileTypeIcon name={item.name} />
                           )}
                           {item.name}
-                        </span>
-                        <span>{item.last_modified ? formatCreatedAt(item.last_modified) : ""}</span>
-                        <span>{item.type === "folder" ? "-" : formatBytes(item.size)}</span>
-                      </button>
+                        </button>
+                        <button
+                          className="object-open-button"
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => openObjectEntry(item)}
+                        >
+                          {item.last_modified ? formatCreatedAt(item.last_modified) : ""}
+                        </button>
+                        <button
+                          className="object-open-button"
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => openObjectEntry(item)}
+                        >
+                          {item.type === "folder" ? "-" : formatBytes(item.size)}
+                        </button>
+                        <button
+                          className="object-open-button"
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => openObjectEntry(item)}
+                        >
+                          No
+                        </button>
+                      </div>
                     ))}
                   </div>
                 )}
 
-                {selectedObject ? (
+                {selectedEntryCount ? (
+                  <aside className="object-details-panel selected-objects-panel" aria-label="Selected objects">
+                    <header className="selected-objects-header">
+                      <h3>Selected Objects:</h3>
+                      <button
+                        type="button"
+                        aria-label="Clear selected objects"
+                        title="Clear selected objects"
+                        onClick={() => setSelectedEntryKeys([])}
+                      >
+                        <X size={20} />
+                      </button>
+                    </header>
+
+                    <section className="object-actions selected-actions" aria-label="Selected object actions">
+                      <h3>Actions:</h3>
+                      <button
+                        type="button"
+                        title="Download selected objects"
+                        onClick={handleDownloadSelectedEntries}
+                      >
+                        <Download size={18} /> Download
+                      </button>
+                      <button
+                        type="button"
+                        title={selectedSingleFile ? "Share selected object" : "Select one file to share"}
+                        disabled={!selectedSingleFile}
+                        onClick={() => handleOpenShare(selectedSingleFile)}
+                      >
+                        <Share2 size={18} /> Share
+                      </button>
+                      <button
+                        type="button"
+                        title={selectedSingleFile ? "Preview selected object" : "Select one file to preview"}
+                        disabled={!selectedSingleFile}
+                        onClick={() => handleOpenPreview(selectedSingleFile)}
+                      >
+                        <Eye size={18} /> Preview
+                      </button>
+                      <button type="button" disabled title="Anonymous access is not available">
+                        <LockKeyhole size={18} /> Anonymous Access
+                      </button>
+                      <button
+                        type="button"
+                        title={`Delete ${selectedEntryCount} selected object${selectedEntryCount === 1 ? "" : "s"}`}
+                        onClick={handleDeleteSelectedEntries}
+                      >
+                        <Trash2 size={18} /> Delete
+                      </button>
+                    </section>
+                  </aside>
+                ) : selectedObject ? (
                   <aside className="object-details-panel" aria-label="Object details">
                     <header className="object-details-header">
                       <FileTypeIcon name={selectedObject.name} />
@@ -1131,21 +1758,21 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
                       <button
                         type="button"
                         title="Download selected object"
-                        onClick={handleDownloadObject}
+                        onClick={() => handleDownloadObject()}
                       >
                         <Download size={18} /> Download
                       </button>
                       <button
                         type="button"
                         title="Share selected object"
-                        onClick={handleOpenShare}
+                        onClick={() => handleOpenShare()}
                       >
                         <Share2 size={18} /> Share
                       </button>
                       <button
                         type="button"
                         title="Preview selected object"
-                        onClick={handleOpenPreview}
+                        onClick={() => handleOpenPreview()}
                       >
                         <Eye size={18} /> Preview
                       </button>
@@ -1158,10 +1785,10 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
                       </button>
                       <button
                         type="button"
-                        title="Display object versions"
-                        onClick={handleDisplayVersions}
+                        title={isVersionsMode ? "Hide object versions" : "Display object versions"}
+                        onClick={isVersionsMode ? handleHideVersions : handleDisplayVersions}
                       >
-                        <History size={18} /> Display Object Versions
+                        <History size={18} /> {isVersionsMode ? "Hide Object Versions" : "Display Object Versions"}
                       </button>
                     </section>
 
@@ -1192,6 +1819,12 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
                           <dt>Size:</dt>
                           <dd>{formatBytes(selectedObject.size)}</dd>
                         </div>
+                        {isVersionsMode ? (
+                          <div>
+                            <dt>Versions:</dt>
+                            <dd>{versionItems.length} versions, {formatBytes(versionTotalSize)}</dd>
+                          </div>
+                        ) : null}
                         <div>
                           <dt>Last Modified:</dt>
                           <dd>{selectedObject.last_modified ? formatCreatedAt(selectedObject.last_modified) : "Unknown"}</dd>
@@ -1269,8 +1902,8 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
       </section>
 
       {isModalOpen ? (
-        <div className="modal-backdrop" role="presentation">
-          <form className="bucket-modal" onSubmit={handleCreateBucket}>
+        <div className="modal-backdrop" role="presentation" onClick={closeModals}>
+          <form className="bucket-modal" onSubmit={handleCreateBucket} onClick={(event) => event.stopPropagation()}>
             <button
               className="modal-close"
               type="button"
@@ -1306,8 +1939,8 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
       ) : null}
 
       {isPathModalOpen ? (
-        <div className="modal-backdrop" role="presentation">
-          <form className="bucket-modal path-modal" onSubmit={handleCreatePath}>
+        <div className="modal-backdrop" role="presentation" onClick={closeModals}>
+          <form className="bucket-modal path-modal" onSubmit={handleCreatePath} onClick={(event) => event.stopPropagation()}>
             <button
               className="modal-close"
               type="button"
@@ -1342,29 +1975,82 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
         </div>
       ) : null}
 
-      {isPreviewModalOpen ? (
-        <div className="modal-backdrop preview-backdrop" role="presentation">
-          <section className="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+      {isRewindModalOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={closeModals}>
+          <section className="rewind-modal" role="dialog" aria-modal="true" aria-labelledby="rewind-title" onClick={(event) => event.stopPropagation()}>
             <button
-              className="modal-close preview-close"
+              className="modal-close"
               type="button"
-              aria-label="Close preview"
-              title="Close preview"
-              onClick={() => setPreviewModalOpen(false)}
+              aria-label="Close"
+              title="Close dialog"
+              onClick={() => setRewindModalOpen(false)}
             >
               <X size={42} />
             </button>
-            <h2 id="preview-title">
-              <Eye className="preview-title-icon" size={34} aria-hidden="true" />
-              Preview - {selectedObject?.key}
-            </h2>
+            <h2 id="rewind-title">Rewind - {selected?.name}</h2>
+
+            <label className="rewind-field">
+              <span>Rewind to</span>
+              <input
+                type="datetime-local"
+                value={rewindDate}
+                onChange={(event) => setRewindDate(event.target.value)}
+              />
+            </label>
+
+            <div className="rewind-status-row">
+              <strong>Current Status</strong>
+              <label className="rewind-toggle">
+                <span>Disabled</span>
+                <input
+                  type="checkbox"
+                  checked={isRewindEnabled}
+                  onChange={(event) => setRewindEnabled(event.target.checked)}
+                />
+                <i aria-hidden="true" />
+                <span>Enabled</span>
+              </label>
+            </div>
+
+            <div className="rewind-actions">
+              <button
+                type="button"
+                disabled={!isRewindEnabled || !rewindDate || isLoadingRewind}
+                title="Show rewind data"
+                onClick={handleShowRewindData}
+              >
+                {isLoadingRewind ? "Loading..." : "Show Rewind Data"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isPreviewModalOpen ? (
+        <div className="modal-backdrop preview-backdrop" role="presentation" onClick={closeModals}>
+          <section className="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title" onClick={(event) => event.stopPropagation()}>
+            <div className="preview-header">
+              <h2 id="preview-title">
+                <Eye className="preview-title-icon" size={34} aria-hidden="true" />
+                Preview - {(previewTarget || selectedObject)?.key}
+              </h2>
+              <button
+                className="preview-close"
+                type="button"
+                aria-label="Close preview"
+                title="Close preview"
+                onClick={() => setPreviewModalOpen(false)}
+              >
+                <X size={36} />
+              </button>
+            </div>
             <div className="preview-notice">
               <strong>File Preview</strong>
               <p>
                 This is a file preview. If you need to work with the full document,
                 download the file instead.
               </p>
-              <button type="button" title="Download file" onClick={handleDownloadObject}>
+              <button type="button" title="Download file" onClick={() => handleDownloadObject(previewTarget || selectedObject, previewVersionId)}>
                 Download File
               </button>
             </div>
@@ -1374,7 +2060,7 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
               ) : (
                 <iframe
                   src={previewUrl}
-                  title={`Preview ${selectedObject?.name || "object"}`}
+                  title={`Preview ${(previewTarget || selectedObject)?.name || "object"}`}
                 />
               )}
             </div>
@@ -1383,8 +2069,8 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
       ) : null}
 
       {isShareModalOpen ? (
-        <div className="modal-backdrop" role="presentation">
-          <section className="share-modal" role="dialog" aria-modal="true" aria-labelledby="share-title">
+        <div className="modal-backdrop" role="presentation" onClick={closeModals}>
+          <section className="share-modal" role="dialog" aria-modal="true" aria-labelledby="share-title" onClick={(event) => event.stopPropagation()}>
             <button
               className="modal-close"
               type="button"
@@ -1470,10 +2156,10 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
       ) : null}
 
       {isTagsModalOpen ? (
-        <div className="modal-backdrop" role="presentation">
-          <form className="bucket-modal tags-modal" onSubmit={handleSaveTags}>
+        <div className="modal-backdrop" role="presentation" onClick={closeModals}>
+          <form className="tags-edit-modal" onSubmit={handleSaveTags} onClick={(event) => event.stopPropagation()}>
             <button
-              className="modal-close"
+              className="modal-close tags-close"
               type="button"
               aria-label="Close"
               title="Close dialog"
@@ -1481,28 +2167,66 @@ function ObjectBrowser({ appScale, routeBucket, token, onAuthExpired, onScaleCha
             >
               <X size={42} />
             </button>
-            <h2>
-              <Tag className="path-mark" size={32} aria-hidden="true" />
-              Object Tags
+            <h2 id="tags-title">
+              <Tag className="tags-title-icon" size={34} aria-hidden="true" />
+              Edit Tags
             </h2>
-            <p className="path-current">
-              <strong>Object:</strong>
-              <span>{selectedObject?.name}</span>
+            <p className="tags-object-name">
+              Tags for: <strong>{selectedObject?.name}</strong>
             </p>
-            <label>
-              <span>Tags</span>
-              <textarea
-                autoFocus
-                value={tagDraft}
-                onChange={(event) => setTagDraft(event.target.value)}
-                placeholder="department=finance&#10;env=prod"
-              />
-            </label>
-            <p className="modal-help">Use one key=value pair per line.</p>
-            <div className="modal-actions">
-              <button type="button" title="Clear tags" onClick={() => setTagDraft("")}>Clear</button>
-              <button className="primary" disabled={isSavingTags} title="Save object tags">
-                {isSavingTags ? "Saving..." : "Save Tags"}
+
+            <section className="current-tags">
+              <h3>Current Tags:</h3>
+              {Object.keys(currentTags).length ? (
+                <div className="current-tags-list">
+                  {Object.entries(currentTags).map(([key, value]) => (
+                    <span className="tag-pill" key={key}>
+                      {key} : {value}
+                      <button
+                        type="button"
+                        aria-label={`Remove tag ${key}`}
+                        title={`Remove tag ${key}`}
+                        disabled={isSavingTags}
+                        onClick={() => handleRemoveTag(key)}
+                      >
+                        <X size={20} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p>There are no tags for this object</p>
+              )}
+            </section>
+
+            <section className="add-tag-section">
+              <h3>
+                <Tag className="tags-title-icon" size={28} aria-hidden="true" />
+                Add New Tag
+              </h3>
+              <label>
+                <span>Tag Key</span>
+                <input
+                  autoFocus
+                  value={tagKey}
+                  onChange={(event) => setTagKey(event.target.value)}
+                  placeholder="Enter Tag Key"
+                />
+              </label>
+              <label>
+                <span>Tag Label</span>
+                <input
+                  value={tagLabel}
+                  onChange={(event) => setTagLabel(event.target.value)}
+                  placeholder="Enter Tag Label"
+                />
+              </label>
+            </section>
+
+            <div className="tags-actions">
+              <button type="button" title="Clear tag form" onClick={handleClearTagForm}>Clear</button>
+              <button className="primary" disabled={isSavingTags || !tagKey.trim() || !tagLabel.trim()} title="Save object tag">
+                {isSavingTags ? "Saving..." : "Save"}
               </button>
             </div>
           </form>

@@ -33,7 +33,7 @@ npm run dev
 
 ## Docker Compose
 
-Run backend, frontend, and MinIO:
+Run backend, frontend, PostgreSQL 17, and MinIO:
 
 ```bash
 cp .env.example .env
@@ -45,11 +45,20 @@ Open:
 - Frontend: http://localhost:5173
 - Backend API: http://localhost:8000/api
 - MinIO console: http://localhost:9001
+- PostgreSQL: localhost:5432
 
 MinIO login:
 
 - Username: value of `MINIO_ROOT_USER` in `.env`
 - Password: value of `MINIO_ROOT_PASSWORD` in `.env`
+
+PostgreSQL login:
+
+- Host: `localhost`
+- Port: value of `POSTGRES_HOST_PORT` in `.env`, default `5432`
+- Maintenance database: value of `POSTGRES_DB` in `.env`, default `minio_custom`
+- Username: value of `POSTGRES_USER` in `.env`
+- Password: value of `POSTGRES_PASSWORD` in `.env`
 
 Share links use `MINIO_PUBLIC_ENDPOINT` from `.env`. For local development this can be `http://localhost:9000`. For deployment, set it to the public MinIO API origin users can reach, for example:
 
@@ -62,7 +71,9 @@ Do not commit `.env`. It contains the MinIO root credentials and Django signing 
 Compose stores generated data in Docker named volumes:
 
 - `MINIO_DATA_DIR` (default `./minio-data`): object data mounted into MinIO at `/data`
-- `backend_data`: SQLite database
+- `postgres_data`: PostgreSQL database cluster
+
+The backend now uses PostgreSQL only. The Compose stack creates the database and user from the `POSTGRES_*` environment values on first startup, then `backend/entrypoint.sh` runs Django migrations.
 
 For production on a dedicated server, set `MINIO_DATA_DIR` to a stable host path such as `/srv/minio/data` or `/mnt/minio-data`. The local `minio-data/` folder is ignored by git. Docker pulls the MinIO image locally; image layers stay outside the repository.
 

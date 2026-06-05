@@ -53,6 +53,13 @@ export function listObjects(token, bucket) {
   return apiRequest(`/buckets/${encodeURIComponent(bucket)}/objects/`, { token });
 }
 
+export function rewindBucket(token, bucket, rewindTo) {
+  return apiRequest(
+    `/buckets/${encodeURIComponent(bucket)}/rewind/?rewind_to=${encodeURIComponent(rewindTo)}`,
+    { token }
+  );
+}
+
 export function uploadObject(token, bucket, file, key) {
   const formData = new FormData();
   formData.append("file", file);
@@ -65,9 +72,10 @@ export function uploadObject(token, bucket, file, key) {
   });
 }
 
-export async function downloadObject(token, bucket, key) {
+export async function downloadObject(token, bucket, key, versionId = "") {
+  const versionParam = versionId ? `&version_id=${encodeURIComponent(versionId)}` : "";
   const response = await fetch(
-    `${API_BASE_URL}/buckets/${encodeURIComponent(bucket)}/objects/download/?key=${encodeURIComponent(key)}`,
+    `${API_BASE_URL}/buckets/${encodeURIComponent(bucket)}/objects/download/?key=${encodeURIComponent(key)}${versionParam}`,
     {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -85,10 +93,11 @@ export async function downloadObject(token, bucket, key) {
   return response.blob();
 }
 
-export function shareObject(token, bucket, key, expiresIn, { preview = false } = {}) {
+export function shareObject(token, bucket, key, expiresIn, { preview = false, versionId = "" } = {}) {
   const previewParam = preview ? "&preview=true" : "";
+  const versionParam = versionId ? `&version_id=${encodeURIComponent(versionId)}` : "";
   return apiRequest(
-    `/buckets/${encodeURIComponent(bucket)}/objects/share/?key=${encodeURIComponent(key)}&expires_in=${encodeURIComponent(expiresIn)}${previewParam}`,
+    `/buckets/${encodeURIComponent(bucket)}/objects/share/?key=${encodeURIComponent(key)}&expires_in=${encodeURIComponent(expiresIn)}${previewParam}${versionParam}`,
     { token }
   );
 }
@@ -118,9 +127,10 @@ export function listObjectVersions(token, bucket, key) {
   );
 }
 
-export function deleteObject(token, bucket, key) {
+export function deleteObject(token, bucket, key, versionId = "") {
+  const versionParam = versionId ? `&version_id=${encodeURIComponent(versionId)}` : "";
   return apiRequest(
-    `/buckets/${encodeURIComponent(bucket)}/objects/?key=${encodeURIComponent(key)}`,
+    `/buckets/${encodeURIComponent(bucket)}/objects/?key=${encodeURIComponent(key)}${versionParam}`,
     {
       token,
       method: "DELETE",

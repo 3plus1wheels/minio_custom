@@ -3,6 +3,8 @@ import mimetypes
 from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
 from django.http import FileResponse
+from django.utils.dateparse import parse_datetime
+from django.utils.timezone import is_naive, make_aware
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -21,6 +23,11 @@ def error_response(exc, status_code=status.HTTP_400_BAD_REQUEST):
 
 def guess_content_type(key):
     return mimetypes.guess_type(key)[0] or "application/octet-stream"
+
+
+def get_optional_version_id(request):
+    version_id = request.query_params.get("version_id")
+    return version_id if version_id not in ("", None) else None
 
 
 class RegisterView(generics.CreateAPIView):
@@ -79,14 +86,88 @@ class BucketDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class BucketRewindView(APIView):
+    def get(self, request, bucket):
+        rewind_to = request.query_params.get("rewind_to")
+        if not rewind_to:
+            return Response({"detail": "Query parameter 'rewind_to' is required."}, status=400)
+
+        rewind_at = parse_datetime(rewind_to)
+        if not rewind_at:
+            return Response({"detail": "Query parameter 'rewind_to' must be a valid datetime."}, status=400)
+        if is_naive(rewind_at):
+            rewind_at = make_aware(rewind_at)
+
+        try:
+            response = get_s3_client().list_object_versions(Bucket=bucket)
+        except (ClientError, BotoCoreError) as exc:
+            return error_response(exc)
+
+        candidates = []
+        for item in response.get("Versions", []):
+            candidates.append(
+                {
+                    "key": item.get("Key"),
+                    "version_id": item.get("VersionId"),
+                    "is_delete_marker": False,
+                    "last_modified": item.get("LastModified"),
+                    "size": item.get("Size", 0),
+                    "etag": item.get("ETag"),
+                    "content_type": "binary/octet-stream",
+                    "metadata": {},
+                }
+            )
+        for item in response.get("DeleteMarkers", []):
+            candidates.append(
+                {
+                    "key": item.get("Key"),
+                    "version_id": item.get("VersionId"),
+                    "is_delete_marker": True,
+                    "last_modified": item.get("LastModified"),
+                    "size": 0,
+                    "etag": "",
+                    "content_type": "binary/octet-stream",
+                    "metadata": {},
+                }
+            )
+
+        latest_by_key = {}
+        for item in sorted(
+            candidates,
+            key=lambda value: value.get("last_modified").timestamp() if value.get("last_modified") else 0,
+            reverse=True,
+        ):
+            key = item.get("key")
+            modified = item.get("last_modified")
+            if not key or not modified or modified > rewind_at or key in latest_by_key:
+                continue
+            latest_by_key[key] = item
+
+        objects = [
+            item
+            for item in latest_by_key.values()
+            if not item.get("is_delete_marker")
+        ]
+        return Response(
+            {
+                "rewind_to": rewind_at,
+                "objects": sorted(objects, key=lambda item: item["key"]),
+            }
+        )
+
+
 class ObjectView(APIView):
     def get(self, request, bucket, download=False):
         key = request.query_params.get("key")
         if download:
             if not key:
                 return Response({"detail": "Query parameter 'key' is required."}, status=400)
+            params = {"Bucket": bucket, "Key": key}
+            version_id = get_optional_version_id(request)
+            if version_id:
+                params["VersionId"] = version_id
             try:
-                s3_object = get_s3_client().get_object(Bucket=bucket, Key=key)
+                s3_object = get_s3_client().get_object(**params)
             except (ClientError, BotoCoreError) as exc:
                 return error_response(exc, status.HTTP_404_NOT_FOUND)
 
@@ -148,8 +229,12 @@ class ObjectView(APIView):
         if not key:
             return Response({"detail": "Query parameter 'key' is required."}, status=400)
 
+        params = {"Bucket": bucket, "Key": key}
+        version_id = get_optional_version_id(request)
+        if version_id:
+            params["VersionId"] = version_id
         try:
-            get_s3_client().delete_object(Bucket=bucket, Key=key)
+            get_s3_client().delete_object(**params)
         except (ClientError, BotoCoreError) as exc:
             return error_response(exc)
 
@@ -168,6 +253,9 @@ class ObjectShareView(APIView):
 
         expires_in = max(60, min(expires_in, 7 * 24 * 60 * 60))
         params = {"Bucket": bucket, "Key": key}
+        version_id = get_optional_version_id(request)
+        if version_id:
+            params["VersionId"] = version_id
         if request.query_params.get("preview") == "true":
             filename = key.split("/")[-1] or "preview"
             params.update(
@@ -240,6 +328,7 @@ class ObjectVersionsView(APIView):
             {
                 "version_id": item.get("VersionId"),
                 "is_latest": item.get("IsLatest", False),
+                "is_delete_marker": False,
                 "last_modified": item.get("LastModified"),
                 "size": item.get("Size", 0),
                 "etag": item.get("ETag"),
@@ -247,4 +336,21 @@ class ObjectVersionsView(APIView):
             for item in response.get("Versions", [])
             if item.get("Key") == key
         ]
-        return Response({"versions": versions})
+        delete_markers = [
+            {
+                "version_id": item.get("VersionId"),
+                "is_latest": item.get("IsLatest", False),
+                "is_delete_marker": True,
+                "last_modified": item.get("LastModified"),
+                "size": 0,
+                "etag": "",
+            }
+            for item in response.get("DeleteMarkers", [])
+            if item.get("Key") == key
+        ]
+        all_versions = sorted(
+            [*versions, *delete_markers],
+            key=lambda item: item.get("last_modified").timestamp() if item.get("last_modified") else 0,
+            reverse=True,
+        )
+        return Response({"versions": all_versions})
