@@ -9,11 +9,17 @@ from storage_api.views import (
     ObjectTagsView,
     ObjectVersionsView,
     ObjectView,
+    UserAdminView,
+    VisibilityGrantView,
 )
 
 
 urlpatterns = [
     path("me/", MeView.as_view(), name="me"),
+    path("users/", UserAdminView.as_view(), name="user-list-create"),
+    path("users/<int:user_id>/", UserAdminView.as_view(), name="user-detail"),
+    path("visibility-grants/", VisibilityGrantView.as_view(), name="visibility-grant-list-create"),
+    path("visibility-grants/<int:grant_id>/", VisibilityGrantView.as_view(), name="visibility-grant-detail"),
     path("buckets/", BucketListCreateView.as_view(), name="bucket-list-create"),
     path("buckets/<str:bucket>/", BucketDetailView.as_view(), name="bucket-detail"),
     path("buckets/<str:bucket>/rewind/", BucketRewindView.as_view(), name="bucket-rewind"),

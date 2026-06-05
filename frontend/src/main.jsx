@@ -11,6 +11,7 @@ import {
   LogOut,
   Moon,
   Share2,
+  Shield,
   Plus,
   RefreshCw,
   Search,
@@ -25,24 +26,32 @@ import {
   Link,
   LockKeyhole,
   User,
+  Users,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { defaultStyles, FileIcon } from "react-file-icon";
 import {
+  createUser,
   createBucket,
+  createVisibilityGrant,
+  deactivateUser,
+  deleteVisibilityGrant,
   deleteObject,
   downloadObject,
+  getMe,
   getObjectTags,
   listBuckets,
   listObjects,
   listObjectVersions,
+  listUsers,
+  listVisibilityGrants,
   login,
-  register,
   rewindBucket,
   saveObjectTags,
   shareObject,
+  updateUser,
   uploadObject,
 } from "./api";
 import "./styles.css";
@@ -284,11 +293,194 @@ function WaveCanvas() {
   return <canvas className="wave-canvas" ref={canvasRef} aria-hidden="true" />;
 }
 
+function AdminPanel({
+  currentUser,
+  users,
+  grants,
+  buckets,
+  newUser,
+  setNewUser,
+  newGrant,
+  setNewGrant,
+  isLoading,
+  onCreateUser,
+  onUpdateUser,
+  onDeactivateUser,
+  onCreateGrant,
+  onDeleteGrant,
+  onRefresh,
+}) {
+  const grantTargetUsers = users.filter((user) => user.role === "editor" || user.role === "viewer");
+  const canManageAdmins = Boolean(currentUser?.permissions?.can_manage_admins);
+
+  return (
+    <section className="admin-panel" aria-label="Admin management">
+      <header className="admin-header">
+        <div>
+          <h2><Shield size={26} /> Admin</h2>
+          <p>Manage users and bucket/prefix visibility.</p>
+        </div>
+        <button type="button" title="Refresh admin data" onClick={onRefresh}>
+          Refresh <RefreshCw size={18} />
+        </button>
+      </header>
+
+      <div className="admin-grid">
+        <section className="admin-section">
+          <h3>Users</h3>
+          <form className="admin-form" onSubmit={onCreateUser}>
+            <input
+              required
+              placeholder="Username"
+              value={newUser.username}
+              onChange={(event) => setNewUser((user) => ({ ...user, username: event.target.value }))}
+            />
+            <input
+              required
+              minLength={8}
+              type="password"
+              placeholder="Password"
+              value={newUser.password}
+              onChange={(event) => setNewUser((user) => ({ ...user, password: event.target.value }))}
+            />
+            <select
+              value={newUser.role}
+              onChange={(event) => setNewUser((user) => ({ ...user, role: event.target.value }))}
+            >
+              <option value="viewer">Viewer</option>
+              <option value="editor">Editor</option>
+              {canManageAdmins ? <option value="admin">Admin</option> : null}
+            </select>
+            <button className="primary" type="submit">Create User</button>
+          </form>
+
+          <div className="admin-table">
+            <div className="admin-row admin-row-head">
+              <span>User</span>
+              <span>Role</span>
+              <span>Active</span>
+              <span>Actions</span>
+            </div>
+            {isLoading ? <p className="admin-empty">Loading...</p> : null}
+            {users.map((user) => (
+              <form className="admin-row" key={user.id} onSubmit={(event) => onUpdateUser(event, user.id)}>
+                <input name="username" defaultValue={user.username} aria-label={`${user.username} username`} />
+                <select name="role" defaultValue={user.role} disabled={user.role === "superuser"}>
+                  {user.role === "superuser" ? <option value="superuser">Superuser</option> : null}
+                  <option value="viewer">Viewer</option>
+                  <option value="editor">Editor</option>
+                  {canManageAdmins || user.role === "admin" ? <option value="admin">Admin</option> : null}
+                </select>
+                <label className="admin-check">
+                  <input name="is_active" type="checkbox" defaultChecked={user.is_active} />
+                  Active
+                </label>
+                <div className="admin-row-actions">
+                  <input name="password" minLength={8} type="password" placeholder="New password" />
+                  <button type="submit" title={`Save ${user.username}`}>Save</button>
+                  <button
+                    type="button"
+                    title={`Deactivate ${user.username}`}
+                    disabled={!user.is_active || user.role === "superuser"}
+                    onClick={() => onDeactivateUser(user)}
+                  >
+                    Disable
+                  </button>
+                </div>
+              </form>
+            ))}
+          </div>
+        </section>
+
+        <section className="admin-section">
+          <h3>Visibility Grants</h3>
+          <form className="admin-form grant-form" onSubmit={onCreateGrant}>
+            <select
+              value={newGrant.target_type}
+              onChange={(event) => setNewGrant((grant) => ({ ...grant, target_type: event.target.value }))}
+            >
+              <option value="role">Role</option>
+              <option value="user">User</option>
+            </select>
+            {newGrant.target_type === "role" ? (
+              <select
+                value={newGrant.role}
+                onChange={(event) => setNewGrant((grant) => ({ ...grant, role: event.target.value }))}
+              >
+                <option value="viewer">Viewer</option>
+                <option value="editor">Editor</option>
+              </select>
+            ) : (
+              <select
+                required
+                value={newGrant.user}
+                onChange={(event) => setNewGrant((grant) => ({ ...grant, user: event.target.value }))}
+              >
+                <option value="">Choose user</option>
+                {grantTargetUsers.map((user) => (
+                  <option key={user.id} value={user.id}>{user.username}</option>
+                ))}
+              </select>
+            )}
+            <input
+              required
+              list="bucket-names"
+              placeholder="Bucket"
+              value={newGrant.bucket}
+              onChange={(event) => setNewGrant((grant) => ({ ...grant, bucket: event.target.value }))}
+            />
+            <datalist id="bucket-names">
+              {buckets.map((bucket) => <option key={bucket.name} value={bucket.name} />)}
+            </datalist>
+            <input
+              placeholder="Prefix, blank = whole bucket"
+              value={newGrant.prefix}
+              onChange={(event) => setNewGrant((grant) => ({ ...grant, prefix: event.target.value }))}
+            />
+            <select
+              value={newGrant.access}
+              onChange={(event) => setNewGrant((grant) => ({ ...grant, access: event.target.value }))}
+            >
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+            </select>
+            <button className="primary" type="submit">Create Grant</button>
+          </form>
+
+          <div className="admin-table grants-table">
+            <div className="admin-row admin-row-head">
+              <span>Target</span>
+              <span>Bucket / Prefix</span>
+              <span>Access</span>
+              <span>Actions</span>
+            </div>
+            {grants.length ? grants.map((grant) => (
+              <div className="admin-row" key={grant.id}>
+                <span>
+                  {grant.target_type === "role"
+                    ? `Role: ${grant.role}`
+                    : `User: ${grant.username || grant.user}`}
+                </span>
+                <span>{grant.bucket}/{grant.prefix || "*"}</span>
+                <span>{grant.access}</span>
+                <div className="admin-row-actions">
+                  <button type="button" title="Delete grant" onClick={() => onDeleteGrant(grant)}>
+                    Delete
+                  </button>
+                </div>
+              </div>
+            )) : <p className="admin-empty">No visibility grants yet.</p>}
+          </div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem("accessToken") || "");
   const accessTokenRef = useRef(accessToken);
   const [route, setRoute] = useState(getRoute);
-  const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -323,18 +515,12 @@ function App() {
     setStatus("");
 
     try {
-      if (mode === "register") {
-        await register(username.trim(), password);
-        setStatus("Account created. Login now.");
-        setMode("login");
-      } else {
-        const tokens = await login(username.trim(), password);
-        localStorage.setItem("accessToken", tokens.access);
-        localStorage.setItem("refreshToken", tokens.refresh);
-        setAccessToken(tokens.access);
-        setStatus("");
-        pushRoute("/browser");
-      }
+      const tokens = await login(username.trim(), password);
+      localStorage.setItem("accessToken", tokens.access);
+      localStorage.setItem("refreshToken", tokens.refresh);
+      setAccessToken(tokens.access);
+      setStatus("");
+      pushRoute("/browser");
     } catch (error) {
       setStatus(error.message);
     } finally {
@@ -405,7 +591,7 @@ function App() {
           <label className="input-row">
             <LockKeyhole size={18} aria-hidden="true" />
             <input
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              autoComplete="current-password"
               placeholder="Password"
               type={showPassword ? "text" : "password"}
               value={password}
@@ -425,24 +611,12 @@ function App() {
           <button
             className="submit-button"
             disabled={!canSubmit}
-            title={mode === "login" ? "Login to object browser" : "Create new account"}
+            title="Login to object browser"
           >
-            {isSubmitting ? "Working..." : mode === "login" ? "Login" : "Create account"}
+            {isSubmitting ? "Working..." : "Login"}
           </button>
 
           {status ? <p className="form-status">{status}</p> : null}
-
-          <button
-            className="mode-button"
-            type="button"
-            title={mode === "login" ? "Switch to account registration" : "Switch to login"}
-            onClick={() => {
-              setStatus("");
-              setMode((value) => (value === "login" ? "register" : "login"));
-            }}
-          >
-            {mode === "login" ? "Need account? Register" : "Have account? Login"}
-          </button>
         </form>
 
         <nav className="auth-links" aria-label="Resources">
@@ -516,12 +690,38 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   const [isSavingTags, setSavingTags] = useState(false);
   const [isLoadingVersions, setLoadingVersions] = useState(false);
   const [isLoadingRewind, setLoadingRewind] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [activeView, setActiveView] = useState("browser");
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [visibilityGrants, setVisibilityGrants] = useState([]);
+  const [newUser, setNewUser] = useState({ username: "", password: "", role: "viewer" });
+  const [newGrant, setNewGrant] = useState({
+    target_type: "role",
+    role: "viewer",
+    user: "",
+    bucket: "",
+    prefix: "",
+    access: "read",
+  });
+  const [isAdminLoading, setAdminLoading] = useState(false);
+  const [writablePrefixes, setWritablePrefixes] = useState([]);
 
   const normalizedName = bucketName.trim().toLowerCase();
   const normalizedFolderPath = normalizeFolderPath(newFolderPath);
   const isValidBucketName = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(normalizedName);
-  const canCreate = isValidBucketName && !isCreating;
-  const canCreatePath = normalizedFolderPath.length > 0;
+  const permissions = currentUser?.permissions || {};
+  const canManageUsers = Boolean(permissions.can_manage_users);
+  const hasGlobalWrite = Boolean(permissions.can_write_storage);
+  const canWritePrefix = (prefix = "") =>
+    hasGlobalWrite ||
+    writablePrefixes.some((grantPrefix) => {
+      if (!grantPrefix) return true;
+      return prefix.startsWith(grantPrefix);
+    });
+  const canWriteKey = (key = "") => canWritePrefix(key);
+  const canWriteCurrentPrefix = canWritePrefix(currentPrefix);
+  const canCreate = isValidBucketName && !isCreating && hasGlobalWrite;
+  const canCreatePath = normalizedFolderPath.length > 0 && canWriteCurrentPrefix;
   const filteredBuckets = buckets.filter((bucket) =>
     bucket.name.toLowerCase().includes(bucketFilter.trim().toLowerCase())
   );
@@ -534,6 +734,10 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   const selectedEntries = objectEntries.filter((item) => selectedEntryKeys.includes(item.key));
   const selectedFileEntries = selectedEntries.filter((item) => item.type !== "folder");
   const selectedSingleFile = selectedFileEntries.length === 1 && selectedEntries.length === 1 ? selectedFileEntries[0] : null;
+  const canDeleteSelectedEntries = selectedEntries.length > 0 && selectedEntries.every((item) => {
+    if (item.type !== "folder") return canWriteKey(item.key);
+    return activeObjects.filter((object) => object.key.startsWith(item.key)).every((object) => canWriteKey(object.key));
+  });
   const hasObjectSidePanel = Boolean(selectedObject) || selectedEntryCount > 0;
   const areAllVisibleEntriesSelected =
     visibleEntryKeys.length > 0 && visibleEntryKeys.every((key) => selectedEntryKeys.includes(key));
@@ -583,9 +787,158 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     setTransfers((current) => current.filter((item) => item.id !== id));
   }
 
+  async function refreshCurrentUser() {
+    try {
+      const data = await getMe(token);
+      setCurrentUser(data);
+      if (!data.permissions?.can_manage_users) setActiveView("browser");
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function refreshAdminData() {
+    if (!canManageUsers) return;
+    setAdminLoading(true);
+    try {
+      const [usersData, grantsData] = await Promise.all([
+        listUsers(token),
+        listVisibilityGrants(token),
+      ]);
+      setAdminUsers(usersData.users || []);
+      setVisibilityGrants(grantsData.grants || []);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    } finally {
+      setAdminLoading(false);
+    }
+  }
+
+  async function handleCreateUser(event) {
+    event.preventDefault();
+    setStatus("");
+    try {
+      const user = await createUser(token, newUser);
+      setAdminUsers((items) => [...items, user].sort((a, b) => a.username.localeCompare(b.username)));
+      setNewUser({ username: "", password: "", role: "viewer" });
+      setStatus(`User "${user.username}" created.`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleUpdateUser(event, userId) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = {
+      username: String(form.get("username") || "").trim(),
+      role: String(form.get("role") || "viewer"),
+      is_active: form.get("is_active") === "on",
+    };
+    const passwordValue = String(form.get("password") || "");
+    if (passwordValue) payload.password = passwordValue;
+    try {
+      const user = await updateUser(token, userId, payload);
+      setAdminUsers((items) => items.map((item) => (item.id === user.id ? user : item)));
+      event.currentTarget.reset();
+      setStatus(`User "${user.username}" updated.`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleDeactivateUser(user) {
+    if (!window.confirm(`Deactivate "${user.username}"?`)) return;
+    try {
+      await deactivateUser(token, user.id);
+      setAdminUsers((items) =>
+        items.map((item) => (item.id === user.id ? { ...item, is_active: false } : item))
+      );
+      setStatus(`User "${user.username}" deactivated.`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleCreateGrant(event) {
+    event.preventDefault();
+    const payload = {
+      target_type: newGrant.target_type,
+      role: newGrant.target_type === "role" ? newGrant.role : "",
+      user: newGrant.target_type === "user" ? Number(newGrant.user) : null,
+      bucket: newGrant.bucket.trim(),
+      prefix: newGrant.prefix.trim(),
+      access: newGrant.access,
+    };
+    try {
+      const grant = await createVisibilityGrant(token, payload);
+      setVisibilityGrants((items) => [...items, grant]);
+      setNewGrant({
+        target_type: "role",
+        role: "viewer",
+        user: "",
+        bucket: "",
+        prefix: "",
+        access: "read",
+      });
+      setStatus("Visibility grant created.");
+      await refreshBuckets();
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleDeleteGrant(grant) {
+    if (!window.confirm("Delete this visibility grant?")) return;
+    try {
+      await deleteVisibilityGrant(token, grant.id);
+      setVisibilityGrants((items) => items.filter((item) => item.id !== grant.id));
+      setStatus("Visibility grant deleted.");
+      await refreshBuckets();
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  useEffect(() => {
+    refreshCurrentUser();
+  }, []);
+
   useEffect(() => {
     refreshBuckets();
   }, []);
+
+  useEffect(() => {
+    if (canManageUsers) refreshAdminData();
+  }, [canManageUsers]);
 
   useEffect(() => {
     closeModals();
@@ -624,6 +977,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   useEffect(() => {
     if (selectedBucket) refreshObjects(selectedBucket);
     else setObjects([]);
+    if (!selectedBucket) setWritablePrefixes([]);
     setCurrentPrefix("");
     setSelectedObject(null);
     setVersionsMode(false);
@@ -681,6 +1035,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
       const data = await listObjects(token, bucket);
       const nextObjects = data.objects || [];
       setObjects(nextObjects);
+      setWritablePrefixes(data.writable_prefixes || []);
       setSelectedObject((current) => {
         if (!current) return null;
         const nextSelected = nextObjects.find((item) => item.key === current.key);
@@ -747,6 +1102,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
 
   async function handleCreateBucket(event) {
     event.preventDefault();
+    if (!hasGlobalWrite) return;
     setCreating(true);
     setStatus("");
 
@@ -774,7 +1130,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   }
 
   async function uploadFiles(files) {
-    if (!selected || files.length === 0) return;
+    if (!selected || files.length === 0 || !canWriteCurrentPrefix) return;
     setUploading(true);
     setStatus(`Uploading ${files.length} file${files.length === 1 ? "" : "s"}...`);
 
@@ -958,7 +1314,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   }
 
   async function handleOpenTags() {
-    if (!selected || !selectedObject) return;
+    if (!selected || !selectedObject || !canWriteKey(selectedObject.key)) return;
     try {
       const data = await getObjectTags(token, selected.name, selectedObject.key);
       setCurrentTags(data.tags || {});
@@ -976,7 +1332,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
 
   async function handleSaveTags(event) {
     event.preventDefault();
-    if (!selected || !selectedObject) return;
+    if (!selected || !selectedObject || !canWriteKey(selectedObject.key)) return;
     const nextKey = tagKey.trim();
     const nextLabel = tagLabel.trim();
     if (!nextKey || !nextLabel) return;
@@ -1010,7 +1366,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   }
 
   async function handleRemoveTag(tagName) {
-    if (!selected || !selectedObject) return;
+    if (!selected || !selectedObject || !canWriteKey(selectedObject.key)) return;
     const { [tagName]: _removed, ...nextTags } = currentTags;
     setSavingTags(true);
     try {
@@ -1111,7 +1467,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   }
 
   async function handleDeleteSelectedEntries() {
-    if (!selected || selectedEntryKeys.length === 0) return;
+    if (!selected || selectedEntryKeys.length === 0 || !canDeleteSelectedEntries) return;
     const count = selectedEntries.length;
     if (!window.confirm(`Delete ${count} selected item${count === 1 ? "" : "s"}? Folder selections delete all objects inside.`)) return;
 
@@ -1189,7 +1545,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   }
 
   async function handleDeleteSelectedVersions() {
-    if (!selected || !selectedObject || selectedVersionIds.length === 0) return;
+    if (!selected || !selectedObject || selectedVersionIds.length === 0 || !canWriteKey(selectedObject.key)) return;
     const count = selectedVersionIds.length;
     if (!window.confirm(`Delete ${count} selected version${count === 1 ? "" : "s"}? This cannot be undone.`)) return;
 
@@ -1211,7 +1567,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   }
 
   async function handleDeleteObject() {
-    if (!selected || !selectedObject) return;
+    if (!selected || !selectedObject || !canWriteKey(selectedObject.key)) return;
     const objectName = selectedObject.name;
     if (!window.confirm(`Delete "${objectName}"? This cannot be undone.`)) return;
     try {
@@ -1244,10 +1600,23 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
           </button>
         </div>
 
-        <button className="sidebar-action" title="Create a new bucket" onClick={() => setModalOpen(true)}>
-          <span><Plus size={24} /></span>
-          Create Bucket
-        </button>
+        {hasGlobalWrite ? (
+          <button className="sidebar-action" title="Create a new bucket" onClick={() => setModalOpen(true)}>
+            <span><Plus size={24} /></span>
+            Create Bucket
+          </button>
+        ) : null}
+
+        {canManageUsers ? (
+          <button
+            className={activeView === "admin" ? "sidebar-action active-admin" : "sidebar-action"}
+            title="Manage users and visibility grants"
+            onClick={() => setActiveView((value) => (value === "admin" ? "browser" : "admin"))}
+          >
+            <span><Users size={24} /></span>
+            Admin
+          </button>
+        ) : null}
 
         <label className="bucket-filter">
           <Search size={21} aria-hidden="true" />
@@ -1265,7 +1634,10 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
               className={bucket.name === selectedBucket ? "bucket-nav-item active" : "bucket-nav-item"}
               key={bucket.name}
               title={`Open bucket ${bucket.name}`}
-              onClick={() => onSelectBucket(bucket.name)}
+              onClick={() => {
+                setActiveView("browser");
+                onSelectBucket(bucket.name);
+              }}
             >
               <span><ShoppingBasket size={18} fill="currentColor" /></span>
               {bucket.name}
@@ -1371,7 +1743,25 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
         </header>
 
         <div className="browser-content">
-          {selected ? (
+          {activeView === "admin" && canManageUsers ? (
+            <AdminPanel
+              currentUser={currentUser}
+              users={adminUsers}
+              grants={visibilityGrants}
+              buckets={buckets}
+              newUser={newUser}
+              setNewUser={setNewUser}
+              newGrant={newGrant}
+              setNewGrant={setNewGrant}
+              isLoading={isAdminLoading}
+              onCreateUser={handleCreateUser}
+              onUpdateUser={handleUpdateUser}
+              onDeactivateUser={handleDeactivateUser}
+              onCreateGrant={handleCreateGrant}
+              onDeleteGrant={handleDeleteGrant}
+              onRefresh={refreshAdminData}
+            />
+          ) : selected ? (
             <section className="bucket-browser">
               <header className="bucket-browser-header">
                 <div className="bucket-title-row">
@@ -1403,6 +1793,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                   >
                     Refresh <RefreshCw size={18} />
                   </button>
+                  {canWriteCurrentPrefix ? (
                   <div className="upload-menu-wrap">
                     <button
                       className="upload-button"
@@ -1435,6 +1826,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                       </div>
                     ) : null}
                   </div>
+                  ) : null}
                 </div>
               </header>
 
@@ -1459,7 +1851,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                   aria-label="Create new path"
                   className="path-create-button"
                   title="Create a folder-like path in this bucket"
-                  disabled={selectedEntryCount > 0}
+                  disabled={selectedEntryCount > 0 || !canWriteCurrentPrefix}
                   onClick={() => setPathModalOpen(true)}
                 >
                   Create new path <FolderPlus size={18} />
@@ -1492,7 +1884,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                         <button
                           type="button"
                           title={selectedVersionCount ? `Delete ${selectedVersionCount} selected version${selectedVersionCount === 1 ? "" : "s"}` : "Select versions to delete"}
-                          disabled={!selectedVersionCount}
+                          disabled={!selectedVersionCount || !canWriteKey(selectedObject.key)}
                           onClick={handleDeleteSelectedVersions}
                         >
                           <Trash2 size={22} />
@@ -1732,6 +2124,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                       <button
                         type="button"
                         title={`Delete ${selectedEntryCount} selected object${selectedEntryCount === 1 ? "" : "s"}`}
+                        disabled={!canDeleteSelectedEntries}
                         onClick={handleDeleteSelectedEntries}
                       >
                         <Trash2 size={18} /> Delete
@@ -1776,13 +2169,15 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                       >
                         <Eye size={18} /> Preview
                       </button>
-                      <button
-                        type="button"
-                        title="Edit object tags"
-                        onClick={handleOpenTags}
-                      >
-                        <Tag size={18} /> Tags
-                      </button>
+                      {canWriteKey(selectedObject.key) ? (
+                        <button
+                          type="button"
+                          title="Edit object tags"
+                          onClick={handleOpenTags}
+                        >
+                          <Tag size={18} /> Tags
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         title={isVersionsMode ? "Hide object versions" : "Display object versions"}
@@ -1792,14 +2187,16 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                       </button>
                     </section>
 
-                    <button
-                      className="delete-object-button"
-                      type="button"
-                      title="Delete selected object"
-                      onClick={handleDeleteObject}
-                    >
-                      <Trash2 size={20} /> Delete
-                    </button>
+                    {canWriteKey(selectedObject.key) ? (
+                      <button
+                        className="delete-object-button"
+                        type="button"
+                        title="Delete selected object"
+                        onClick={handleDeleteObject}
+                      >
+                        <Trash2 size={20} /> Delete
+                      </button>
+                    ) : null}
 
                     <section className="object-info">
                       <div className="details-section-heading">
@@ -1884,16 +2281,20 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                 MinIO uses buckets to organize objects. A bucket is similar to a folder or
                 directory in a filesystem, where each bucket can hold an arbitrary number of objects.
               </p>
-              <p>
-                To get started,{" "}
-                <button
-                  className="inline-link"
-                  title="Create a new bucket"
-                  onClick={() => setModalOpen(true)}
-                >
-                  Create a Bucket.
-                </button>
-              </p>
+              {hasGlobalWrite ? (
+                <p>
+                  To get started,{" "}
+                  <button
+                    className="inline-link"
+                    title="Create a new bucket"
+                    onClick={() => setModalOpen(true)}
+                  >
+                    Create a Bucket.
+                  </button>
+                </p>
+              ) : (
+                <p>No buckets are available for your account yet.</p>
+              )}
             </section>
           )}
 

@@ -47,6 +47,28 @@ Open:
 - MinIO console: http://localhost:9001
 - PostgreSQL: localhost:5432
 
+Create the first root app user after the stack is running:
+
+```bash
+docker compose -f compose.yml exec backend python manage.py createsuperuser
+```
+
+Log in to the frontend with that account. Open the `Admin` tab to create normal users and assign visibility grants.
+
+App roles:
+
+- `superuser`: full root access, including admins and all storage.
+- `admin`: manages editor/viewer users and visibility grants; cannot manage superusers.
+- `editor`: reads and writes only granted buckets or prefixes.
+- `viewer`: reads only granted buckets or prefixes.
+
+Visibility grants:
+
+- Target can be a role or a specific user.
+- Blank prefix means the whole bucket.
+- `write` implies `read`.
+- Editor/viewer accounts see no buckets until an admin or superuser grants access.
+
 MinIO login:
 
 - Username: value of `MINIO_ROOT_USER` in `.env`
@@ -59,6 +81,22 @@ PostgreSQL login:
 - Maintenance database: value of `POSTGRES_DB` in `.env`, default `minio_custom`
 - Username: value of `POSTGRES_USER` in `.env`
 - Password: value of `POSTGRES_PASSWORD` in `.env`
+
+pgAdmin 4 setup:
+
+1. Right-click `Servers`.
+2. Select `Register` > `Server...`.
+3. On `General`, set `Name` to `minio_custom`.
+4. On `Connection`, set:
+   - `Host name/address`: `localhost`
+   - `Port`: value of `POSTGRES_HOST_PORT` in `.env`
+   - `Maintenance database`: value of `POSTGRES_DB` in `.env`
+   - `Username`: value of `POSTGRES_USER` in `.env`
+   - `Password`: value of `POSTGRES_PASSWORD` in `.env`
+5. Click `Save`.
+6. Expand `Servers > minio_custom > Databases > minio_custom > Schemas > public > Tables`.
+
+If local PostgreSQL already uses port `5432`, set `POSTGRES_HOST_PORT=5433` in `.env` and use port `5433` in pgAdmin. Red X icons on other pgAdmin databases usually mean stale or disconnected entries; they are unrelated to this Docker database.
 
 Share links use `MINIO_PUBLIC_ENDPOINT` from `.env`. For local development this can be `http://localhost:9000`. For deployment, set it to the public MinIO API origin users can reach, for example:
 

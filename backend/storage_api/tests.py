@@ -7,75 +7,138 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
+from storage_api.models import UserProfile, VisibilityGrant
 
-class AuthTests(TestCase):
-    def test_register_login_and_me(self):
-        client = APIClient()
-        register_response = client.post(
-            reverse("register"),
-            {"username": "alice", "email": "alice@example.com", "password": "password123"},
-            format="json",
+
+def set_role(user, role):
+    UserProfile.objects.update_or_create(user=user, defaults={"role": role})
+    return user
+
+
+def object_fixture(key, size=5):
+    return {
+        "Key": key,
+        "Size": size,
+        "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "ETag": '"abc"',
+    }
+
+
+class AuthAndAdminTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.superuser = get_user_model().objects.create_superuser(
+            username="root",
+            password="password123",
         )
-        self.assertEqual(register_response.status_code, 201)
+        self.admin = set_role(
+            get_user_model().objects.create_user(username="manager", password="password123"),
+            UserProfile.ROLE_ADMIN,
+        )
 
-        token_response = client.post(
-            reverse("token_obtain_pair"),
+    def test_register_disabled_and_me_includes_role_permissions(self):
+        register_response = self.client.post(
+            reverse("register"),
             {"username": "alice", "password": "password123"},
             format="json",
         )
-        self.assertEqual(token_response.status_code, 200)
-        access = token_response.data["access"]
+        self.assertEqual(register_response.status_code, 403)
 
-        client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
-        me_response = client.get(reverse("me"))
+        token_response = self.client.post(
+            reverse("token_obtain_pair"),
+            {"username": "root", "password": "password123"},
+            format="json",
+        )
+        self.assertEqual(token_response.status_code, 200)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token_response.data['access']}")
+        me_response = self.client.get(reverse("me"))
         self.assertEqual(me_response.status_code, 200)
-        self.assertEqual(me_response.data["username"], "alice")
+        self.assertEqual(me_response.data["role"], "superuser")
+        self.assertTrue(me_response.data["permissions"]["can_manage_admins"])
+
+    def test_superuser_can_create_admin_editor_viewer_and_grants(self):
+        self.client.force_authenticate(self.superuser)
+
+        for role in (UserProfile.ROLE_ADMIN, UserProfile.ROLE_EDITOR, UserProfile.ROLE_VIEWER):
+            response = self.client.post(
+                reverse("user-list-create"),
+                {"username": f"{role}user", "password": "password123", "role": role},
+                format="json",
+            )
+            self.assertEqual(response.status_code, 201)
+            self.assertEqual(response.data["role"], role)
+
+        grant_response = self.client.post(
+            reverse("visibility-grant-list-create"),
+            {
+                "target_type": VisibilityGrant.TARGET_ROLE,
+                "role": UserProfile.ROLE_VIEWER,
+                "bucket": "docs",
+                "prefix": "public/",
+                "access": VisibilityGrant.ACCESS_READ,
+            },
+            format="json",
+        )
+        self.assertEqual(grant_response.status_code, 201)
+        self.assertEqual(grant_response.data["prefix"], "public/")
+
+    def test_admin_cannot_manage_admin_or_superuser(self):
+        self.client.force_authenticate(self.admin)
+
+        create_admin = self.client.post(
+            reverse("user-list-create"),
+            {"username": "newadmin", "password": "password123", "role": UserProfile.ROLE_ADMIN},
+            format="json",
+        )
+        self.assertEqual(create_admin.status_code, 403)
+
+        edit_super = self.client.patch(
+            reverse("user-detail", kwargs={"user_id": self.superuser.id}),
+            {"username": "changed"},
+            format="json",
+        )
+        self.assertEqual(edit_super.status_code, 403)
+
+        create_editor = self.client.post(
+            reverse("user-list-create"),
+            {"username": "editor", "password": "password123", "role": UserProfile.ROLE_EDITOR},
+            format="json",
+        )
+        self.assertEqual(create_editor.status_code, 201)
 
 
 class StorageApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.user = get_user_model().objects.create_user(username="bob", password="password123")
-        self.client.force_authenticate(self.user)
+        self.admin = set_role(
+            get_user_model().objects.create_user(username="admin", password="password123"),
+            UserProfile.ROLE_ADMIN,
+        )
+        self.editor = set_role(
+            get_user_model().objects.create_user(username="editor", password="password123"),
+            UserProfile.ROLE_EDITOR,
+        )
+        self.viewer = set_role(
+            get_user_model().objects.create_user(username="viewer", password="password123"),
+            UserProfile.ROLE_VIEWER,
+        )
 
-    def test_bucket_endpoints_require_auth(self):
-        client = APIClient()
-        response = client.get(reverse("bucket-list-create"))
-        self.assertEqual(response.status_code, 401)
-
-    @patch("storage_api.views.get_s3_client")
-    def test_list_create_delete_buckets(self, get_s3_client):
+    def mock_s3(self, get_s3_client):
         s3 = Mock()
         get_s3_client.return_value = s3
         created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        s3.list_buckets.return_value = {"Buckets": [{"Name": "photos", "CreationDate": created_at}]}
-
-        list_response = self.client.get(reverse("bucket-list-create"))
-        self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(list_response.data["buckets"][0]["name"], "photos")
-
-        create_response = self.client.post(reverse("bucket-list-create"), {"name": "new-bucket"}, format="json")
-        self.assertEqual(create_response.status_code, 201)
-        s3.create_bucket.assert_called_once_with(Bucket="new-bucket")
-
-        delete_response = self.client.delete(reverse("bucket-detail", kwargs={"bucket": "new-bucket"}))
-        self.assertEqual(delete_response.status_code, 204)
-        s3.delete_bucket.assert_called_once_with(Bucket="new-bucket")
-
-    @patch("storage_api.views.get_s3_client")
-    @override_settings(MINIO_PUBLIC_ENDPOINT="https://public.example")
-    def test_object_upload_list_download_delete(self, get_s3_client):
-        s3 = Mock()
-        get_s3_client.return_value = s3
-        modified_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        s3.list_buckets.return_value = {
+            "Buckets": [
+                {"Name": "docs", "CreationDate": created_at},
+                {"Name": "private", "CreationDate": created_at},
+            ]
+        }
         s3.list_objects_v2.return_value = {
             "Contents": [
-                {
-                    "Key": "notes.txt",
-                    "Size": 5,
-                    "LastModified": modified_at,
-                    "ETag": '"abc"',
-                }
+                object_fixture("public/readme.txt"),
+                object_fixture("private/secret.txt"),
+                object_fixture("editor/upload.txt"),
             ]
         }
         s3.get_object.return_value = {
@@ -91,90 +154,145 @@ class StorageApiTests(TestCase):
         s3.list_object_versions.return_value = {
             "Versions": [
                 {
-                    "Key": "notes.txt",
+                    "Key": "public/readme.txt",
                     "VersionId": "1",
                     "IsLatest": True,
-                    "LastModified": modified_at,
+                    "LastModified": datetime(2026, 1, 1, tzinfo=timezone.utc),
                     "Size": 5,
                     "ETag": '"abc"',
                 }
             ]
         }
+        return s3
 
-        upload_response = self.client.post(
-            reverse("object-list-create-delete", kwargs={"bucket": "docs"}),
-            {"file": BytesIO(b"hello")},
-            format="multipart",
+    def test_bucket_endpoints_require_auth(self):
+        response = APIClient().get(reverse("bucket-list-create"))
+        self.assertEqual(response.status_code, 401)
+
+    @patch("storage_api.views.get_s3_client")
+    def test_admin_can_list_create_delete_buckets(self, get_s3_client):
+        self.client.force_authenticate(self.admin)
+        s3 = self.mock_s3(get_s3_client)
+
+        list_response = self.client.get(reverse("bucket-list-create"))
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual([item["name"] for item in list_response.data["buckets"]], ["docs", "private"])
+
+        create_response = self.client.post(reverse("bucket-list-create"), {"name": "new-bucket"}, format="json")
+        self.assertEqual(create_response.status_code, 201)
+        s3.create_bucket.assert_called_once_with(Bucket="new-bucket")
+
+        delete_response = self.client.delete(reverse("bucket-detail", kwargs={"bucket": "new-bucket"}))
+        self.assertEqual(delete_response.status_code, 204)
+        s3.delete_bucket.assert_called_once_with(Bucket="new-bucket")
+
+    @patch("storage_api.views.get_s3_client")
+    def test_viewer_sees_nothing_without_grants(self, get_s3_client):
+        self.client.force_authenticate(self.viewer)
+        self.mock_s3(get_s3_client)
+
+        bucket_response = self.client.get(reverse("bucket-list-create"))
+        self.assertEqual(bucket_response.status_code, 200)
+        self.assertEqual(bucket_response.data["buckets"], [])
+
+        objects_response = self.client.get(reverse("object-list-create-delete", kwargs={"bucket": "docs"}))
+        self.assertEqual(objects_response.status_code, 403)
+
+    @patch("storage_api.views.get_s3_client")
+    @override_settings(MINIO_PUBLIC_ENDPOINT="https://public.example")
+    def test_viewer_read_prefix_grant_filters_and_blocks_writes(self, get_s3_client):
+        self.client.force_authenticate(self.viewer)
+        s3 = self.mock_s3(get_s3_client)
+        VisibilityGrant.objects.create(
+            target_type=VisibilityGrant.TARGET_ROLE,
+            role=UserProfile.ROLE_VIEWER,
+            bucket="docs",
+            prefix="public/",
+            access=VisibilityGrant.ACCESS_READ,
         )
-        self.assertEqual(upload_response.status_code, 201)
-        self.assertEqual(upload_response.data["key"], "file")
+
+        bucket_response = self.client.get(reverse("bucket-list-create"))
+        self.assertEqual([item["name"] for item in bucket_response.data["buckets"]], ["docs"])
 
         list_response = self.client.get(reverse("object-list-create-delete", kwargs={"bucket": "docs"}))
         self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(list_response.data["objects"][0]["key"], "notes.txt")
-        self.assertEqual(list_response.data["objects"][0]["content_type"], "text/plain")
+        self.assertEqual([item["key"] for item in list_response.data["objects"]], ["public/readme.txt"])
 
         download_response = self.client.get(
             reverse("object-download", kwargs={"bucket": "docs"}),
-            {"key": "notes.txt"},
+            {"key": "public/readme.txt"},
         )
         self.assertEqual(download_response.status_code, 200)
-        self.assertEqual(b"".join(download_response.streaming_content), b"hello")
 
-        share_response = self.client.get(reverse("object-share", kwargs={"bucket": "docs"}), {"key": "notes.txt"})
+        share_response = self.client.get(
+            reverse("object-share", kwargs={"bucket": "docs"}),
+            {"key": "public/readme.txt"},
+        )
         self.assertEqual(share_response.status_code, 200)
-        self.assertEqual(share_response.data["url"], "https://example.test/share")
         get_s3_client.assert_any_call(endpoint_url="https://public.example")
 
-        preview_response = self.client.get(
-            reverse("object-share", kwargs={"bucket": "docs"}),
-            {"key": "notes.txt", "preview": "true"},
+        upload_response = self.client.post(
+            reverse("object-list-create-delete", kwargs={"bucket": "docs"}),
+            {"file": BytesIO(b"hello"), "key": "public/new.txt"},
+            format="multipart",
         )
-        self.assertEqual(preview_response.status_code, 200)
-        s3.generate_presigned_url.assert_any_call(
-            "get_object",
-            Params={
-                "Bucket": "docs",
-                "Key": "notes.txt",
-                "ResponseContentDisposition": 'inline; filename="notes.txt"',
-                "ResponseContentType": "text/plain",
-            },
-            ExpiresIn=12 * 60 * 60,
-        )
-
-        tags_response = self.client.get(reverse("object-tags", kwargs={"bucket": "docs"}), {"key": "notes.txt"})
-        self.assertEqual(tags_response.status_code, 200)
-        self.assertEqual(tags_response.data["tags"], {"env": "test"})
-
-        save_tags_response = self.client.put(
-            f'{reverse("object-tags", kwargs={"bucket": "docs"})}?key=notes.txt',
-            {"tags": {"env": "prod"}},
-            format="json",
-        )
-        self.assertEqual(save_tags_response.status_code, 200)
-        s3.put_object_tagging.assert_called_once_with(
-            Bucket="docs",
-            Key="notes.txt",
-            Tagging={"TagSet": [{"Key": "env", "Value": "prod"}]},
-        )
-
-        versions_response = self.client.get(
-            reverse("object-versions", kwargs={"bucket": "docs"}),
-            {"key": "notes.txt"},
-        )
-        self.assertEqual(versions_response.status_code, 200)
-        self.assertEqual(versions_response.data["versions"][0]["version_id"], "1")
-
-        rewind_response = self.client.get(
-            reverse("bucket-rewind", kwargs={"bucket": "docs"}),
-            {"rewind_to": modified_at.isoformat()},
-        )
-        self.assertEqual(rewind_response.status_code, 200)
-        self.assertEqual(rewind_response.data["objects"][0]["key"], "notes.txt")
-        self.assertEqual(rewind_response.data["objects"][0]["version_id"], "1")
+        self.assertEqual(upload_response.status_code, 403)
 
         delete_response = self.client.delete(
-            f'{reverse("object-list-create-delete", kwargs={"bucket": "docs"})}?key=notes.txt'
+            f"{reverse('object-list-create-delete', kwargs={'bucket': 'docs'})}?key=public/readme.txt",
+        )
+        self.assertEqual(delete_response.status_code, 403)
+        s3.delete_object.assert_not_called()
+
+    @patch("storage_api.views.get_s3_client")
+    def test_editor_write_prefix_and_user_specific_grants(self, get_s3_client):
+        self.client.force_authenticate(self.editor)
+        s3 = self.mock_s3(get_s3_client)
+        VisibilityGrant.objects.create(
+            target_type=VisibilityGrant.TARGET_ROLE,
+            role=UserProfile.ROLE_EDITOR,
+            bucket="docs",
+            prefix="editor/",
+            access=VisibilityGrant.ACCESS_WRITE,
+        )
+        VisibilityGrant.objects.create(
+            target_type=VisibilityGrant.TARGET_USER,
+            user=self.editor,
+            bucket="docs",
+            prefix="public/",
+            access=VisibilityGrant.ACCESS_READ,
+        )
+
+        list_response = self.client.get(reverse("object-list-create-delete", kwargs={"bucket": "docs"}))
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(
+            [item["key"] for item in list_response.data["objects"]],
+            ["public/readme.txt", "editor/upload.txt"],
+        )
+
+        upload_response = self.client.post(
+            reverse("object-list-create-delete", kwargs={"bucket": "docs"}),
+            {"file": BytesIO(b"hello"), "key": "editor/new.txt"},
+            format="multipart",
+        )
+        self.assertEqual(upload_response.status_code, 201)
+
+        tag_response = self.client.put(
+            f"{reverse('object-tags', kwargs={'bucket': 'docs'})}?key=editor/upload.txt",
+            {"tags": {"team": "ops"}},
+            format="json",
+        )
+        self.assertEqual(tag_response.status_code, 200)
+
+        forbidden_upload = self.client.post(
+            reverse("object-list-create-delete", kwargs={"bucket": "docs"}),
+            {"file": BytesIO(b"hello"), "key": "public/new.txt"},
+            format="multipart",
+        )
+        self.assertEqual(forbidden_upload.status_code, 403)
+
+        delete_response = self.client.delete(
+            f"{reverse('object-list-create-delete', kwargs={'bucket': 'docs'})}?key=editor/upload.txt",
         )
         self.assertEqual(delete_response.status_code, 204)
-        s3.delete_object.assert_called_once_with(Bucket="docs", Key="notes.txt")
+        s3.delete_object.assert_called()

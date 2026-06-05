@@ -30,10 +30,53 @@ export function login(username, password) {
   });
 }
 
-export function register(username, password) {
-  return apiRequest("/auth/register/", {
+export function getMe(token) {
+  return apiRequest("/me/", { token });
+}
+
+export function listUsers(token) {
+  return apiRequest("/users/", { token });
+}
+
+export function createUser(token, user) {
+  return apiRequest("/users/", {
+    token,
     method: "POST",
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify(user),
+  });
+}
+
+export function updateUser(token, id, user) {
+  return apiRequest(`/users/${encodeURIComponent(id)}/`, {
+    token,
+    method: "PATCH",
+    body: JSON.stringify(user),
+  });
+}
+
+export function deactivateUser(token, id) {
+  return apiRequest(`/users/${encodeURIComponent(id)}/`, {
+    token,
+    method: "DELETE",
+  });
+}
+
+export function listVisibilityGrants(token) {
+  return apiRequest("/visibility-grants/", { token });
+}
+
+export function createVisibilityGrant(token, grant) {
+  return apiRequest("/visibility-grants/", {
+    token,
+    method: "POST",
+    body: JSON.stringify(grant),
+  });
+}
+
+export function deleteVisibilityGrant(token, id) {
+  return apiRequest(`/visibility-grants/${encodeURIComponent(id)}/`, {
+    token,
+    method: "DELETE",
   });
 }
 

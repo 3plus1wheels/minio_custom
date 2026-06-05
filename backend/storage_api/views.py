@@ -2,15 +2,24 @@ import mimetypes
 
 from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.http import FileResponse
+from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 from django.utils.timezone import is_naive, make_aware
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from storage_api.models import UserProfile, VisibilityGrant
 from storage_api.minio_client import get_s3_client
-from storage_api.serializers import BucketSerializer, ObjectUploadSerializer, RegisterSerializer
+from storage_api.serializers import (
+    BucketSerializer,
+    ObjectUploadSerializer,
+    RegisterSerializer,
+    UserAdminSerializer,
+    VisibilityGrantSerializer,
+)
 
 
 def error_response(exc, status_code=status.HTTP_400_BAD_REQUEST):
@@ -30,9 +39,111 @@ def get_optional_version_id(request):
     return version_id if version_id not in ("", None) else None
 
 
+def forbidden(message="You do not have permission to perform this action."):
+    return Response({"detail": message}, status=status.HTTP_403_FORBIDDEN)
+
+
+def get_role(user):
+    if user.is_superuser:
+        return "superuser"
+    profile, _ = UserProfile.objects.get_or_create(user=user)
+    return profile.role
+
+
+def is_admin(user):
+    return user.is_superuser or get_role(user) == UserProfile.ROLE_ADMIN
+
+
+def can_manage_user(actor, target):
+    if actor.is_superuser:
+        return target.id != actor.id
+    if get_role(actor) != UserProfile.ROLE_ADMIN or target.id == actor.id:
+        return False
+    return not target.is_superuser and get_role(target) in (UserProfile.ROLE_EDITOR, UserProfile.ROLE_VIEWER)
+
+
+def user_permissions(user):
+    role = get_role(user)
+    manage_users = user.is_superuser or role == UserProfile.ROLE_ADMIN
+    return {
+        "can_manage_users": manage_users,
+        "can_manage_admins": user.is_superuser,
+        "can_read_storage": True,
+        "can_write_storage": user.is_superuser or role == UserProfile.ROLE_ADMIN,
+        "role": role,
+    }
+
+
+def normalize_prefix(prefix):
+    return str(prefix or "").strip().lstrip("/")
+
+
+def grants_for_user(user, bucket=None):
+    if is_admin(user):
+        return VisibilityGrant.objects.none()
+    role = get_role(user)
+    query = Q(target_type=VisibilityGrant.TARGET_ROLE, role=role) | Q(
+        target_type=VisibilityGrant.TARGET_USER,
+        user=user,
+    )
+    grants = VisibilityGrant.objects.filter(query)
+    if bucket is not None:
+        grants = grants.filter(bucket=bucket)
+    return grants
+
+
+def has_storage_access(user, bucket, key="", access=VisibilityGrant.ACCESS_READ):
+    if is_admin(user):
+        return True
+    allowed_access = [access]
+    if access == VisibilityGrant.ACCESS_READ:
+        allowed_access.append(VisibilityGrant.ACCESS_WRITE)
+    normalized_key = normalize_prefix(key)
+    for grant in grants_for_user(user, bucket).filter(access__in=allowed_access):
+        prefix = normalize_prefix(grant.prefix)
+        if not normalized_key or not prefix or normalized_key.startswith(prefix):
+            return True
+    return False
+
+
+def filter_objects_for_user(user, bucket, objects):
+    if is_admin(user):
+        return objects
+    grants = list(
+        grants_for_user(user, bucket).filter(
+            access__in=[VisibilityGrant.ACCESS_READ, VisibilityGrant.ACCESS_WRITE]
+        )
+    )
+    if not grants:
+        return []
+    allowed_prefixes = [normalize_prefix(grant.prefix) for grant in grants]
+    if "" in allowed_prefixes:
+        return objects
+    return [
+        item
+        for item in objects
+        if any(item.get("key", "").startswith(prefix) for prefix in allowed_prefixes)
+    ]
+
+
+def writable_prefixes_for_user(user, bucket):
+    if is_admin(user):
+        return [""]
+    return [
+        normalize_prefix(grant.prefix)
+        for grant in grants_for_user(user, bucket).filter(access=VisibilityGrant.ACCESS_WRITE)
+    ]
+
+
 class RegisterView(generics.CreateAPIView):
     permission_classes = [permissions.AllowAny]
     serializer_class = RegisterSerializer
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {"detail": "Public registration is disabled. Ask an administrator to create an account."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
 
 class MeView(APIView):
@@ -42,9 +153,111 @@ class MeView(APIView):
             {
                 "id": user.id,
                 "username": user.get_username(),
-                "email": user.email,
+                "role": get_role(user),
+                "is_superuser": user.is_superuser,
+                "permissions": user_permissions(user),
             }
         )
+
+
+class UserAdminView(APIView):
+    def get(self, request, user_id=None):
+        if not is_admin(request.user):
+            return forbidden()
+        if user_id:
+            try:
+                user = get_user_model().objects.get(pk=user_id)
+            except get_user_model().DoesNotExist:
+                return Response({"detail": "User not found."}, status=404)
+            if not request.user.is_superuser and (user.is_superuser or get_role(user) == UserProfile.ROLE_ADMIN):
+                return forbidden("Admins cannot view admin or superuser accounts.")
+            return Response(UserAdminSerializer(user).data)
+        users = get_user_model().objects.all().order_by("username")
+        if not request.user.is_superuser:
+            users = [user for user in users if not user.is_superuser and get_role(user) != UserProfile.ROLE_ADMIN]
+        return Response({"users": UserAdminSerializer(users, many=True).data})
+
+    def post(self, request):
+        if not is_admin(request.user):
+            return forbidden()
+        serializer = UserAdminSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        role = serializer.validated_data.get("role", UserProfile.ROLE_VIEWER)
+        if not request.user.is_superuser and role == UserProfile.ROLE_ADMIN:
+            return forbidden("Admins cannot create admin users.")
+        user = serializer.save()
+        return Response(UserAdminSerializer(user).data, status=status.HTTP_201_CREATED)
+
+    def patch(self, request, user_id):
+        if not is_admin(request.user):
+            return forbidden()
+        try:
+            user = get_user_model().objects.get(pk=user_id)
+        except get_user_model().DoesNotExist:
+            return Response({"detail": "User not found."}, status=404)
+        if not can_manage_user(request.user, user):
+            return forbidden("You cannot modify this user.")
+        requested_role = request.data.get("role")
+        if not request.user.is_superuser and requested_role == UserProfile.ROLE_ADMIN:
+            return forbidden("Admins cannot promote users to admin.")
+        serializer = UserAdminSerializer(user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        return Response(UserAdminSerializer(serializer.save()).data)
+
+    def delete(self, request, user_id):
+        if not is_admin(request.user):
+            return forbidden()
+        try:
+            user = get_user_model().objects.get(pk=user_id)
+        except get_user_model().DoesNotExist:
+            return Response({"detail": "User not found."}, status=404)
+        if not can_manage_user(request.user, user):
+            return forbidden("You cannot deactivate this user.")
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VisibilityGrantView(APIView):
+    def get(self, request, grant_id=None):
+        if not is_admin(request.user):
+            return forbidden()
+        if grant_id:
+            try:
+                grant = VisibilityGrant.objects.get(pk=grant_id)
+            except VisibilityGrant.DoesNotExist:
+                return Response({"detail": "Grant not found."}, status=404)
+            return Response(VisibilityGrantSerializer(grant).data)
+        return Response({"grants": VisibilityGrantSerializer(VisibilityGrant.objects.all(), many=True).data})
+
+    def post(self, request):
+        if not is_admin(request.user):
+            return forbidden()
+        serializer = VisibilityGrantSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        grant = serializer.save()
+        return Response(VisibilityGrantSerializer(grant).data, status=status.HTTP_201_CREATED)
+
+    def patch(self, request, grant_id):
+        if not is_admin(request.user):
+            return forbidden()
+        try:
+            grant = VisibilityGrant.objects.get(pk=grant_id)
+        except VisibilityGrant.DoesNotExist:
+            return Response({"detail": "Grant not found."}, status=404)
+        serializer = VisibilityGrantSerializer(grant, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        return Response(VisibilityGrantSerializer(serializer.save()).data)
+
+    def delete(self, request, grant_id):
+        if not is_admin(request.user):
+            return forbidden()
+        try:
+            grant = VisibilityGrant.objects.get(pk=grant_id)
+        except VisibilityGrant.DoesNotExist:
+            return Response({"detail": "Grant not found."}, status=404)
+        grant.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class BucketListCreateView(APIView):
@@ -60,10 +273,13 @@ class BucketListCreateView(APIView):
                 "created_at": bucket["CreationDate"],
             }
             for bucket in response.get("Buckets", [])
+            if has_storage_access(request.user, bucket["Name"])
         ]
         return Response({"buckets": buckets})
 
     def post(self, request):
+        if not is_admin(request.user):
+            return forbidden()
         serializer = BucketSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         bucket_name = serializer.validated_data["name"]
@@ -78,6 +294,8 @@ class BucketListCreateView(APIView):
 
 class BucketDetailView(APIView):
     def delete(self, request, bucket):
+        if not is_admin(request.user):
+            return forbidden()
         try:
             get_s3_client().delete_bucket(Bucket=bucket)
         except (ClientError, BotoCoreError) as exc:
@@ -88,6 +306,8 @@ class BucketDetailView(APIView):
 
 class BucketRewindView(APIView):
     def get(self, request, bucket):
+        if not has_storage_access(request.user, bucket):
+            return forbidden()
         rewind_to = request.query_params.get("rewind_to")
         if not rewind_to:
             return Response({"detail": "Query parameter 'rewind_to' is required."}, status=400)
@@ -148,10 +368,12 @@ class BucketRewindView(APIView):
             for item in latest_by_key.values()
             if not item.get("is_delete_marker")
         ]
+        objects = filter_objects_for_user(request.user, bucket, objects)
         return Response(
             {
                 "rewind_to": rewind_at,
                 "objects": sorted(objects, key=lambda item: item["key"]),
+                "writable_prefixes": writable_prefixes_for_user(request.user, bucket),
             }
         )
 
@@ -162,6 +384,8 @@ class ObjectView(APIView):
         if download:
             if not key:
                 return Response({"detail": "Query parameter 'key' is required."}, status=400)
+            if not has_storage_access(request.user, bucket, key):
+                return forbidden()
             params = {"Bucket": bucket, "Key": key}
             version_id = get_optional_version_id(request)
             if version_id:
@@ -178,6 +402,8 @@ class ObjectView(APIView):
                 content_type=s3_object.get("ContentType", "application/octet-stream"),
             )
 
+        if not has_storage_access(request.user, bucket):
+            return forbidden()
         try:
             response = get_s3_client().list_objects_v2(Bucket=bucket)
         except (ClientError, BotoCoreError) as exc:
@@ -202,13 +428,21 @@ class ObjectView(APIView):
             object_data["content_type"] = head.get("ContentType") or object_data["content_type"]
             object_data["metadata"] = head.get("Metadata") or {}
             objects.append(object_data)
-        return Response({"objects": objects})
+        objects = filter_objects_for_user(request.user, bucket, objects)
+        return Response(
+            {
+                "objects": objects,
+                "writable_prefixes": writable_prefixes_for_user(request.user, bucket),
+            }
+        )
 
     def post(self, request, bucket):
         serializer = ObjectUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         uploaded_file = serializer.validated_data["file"]
         key = serializer.validated_data.get("key") or uploaded_file.name
+        if not has_storage_access(request.user, bucket, key, VisibilityGrant.ACCESS_WRITE):
+            return forbidden()
 
         extra_args = {}
         if uploaded_file.content_type:
@@ -228,6 +462,8 @@ class ObjectView(APIView):
         key = request.query_params.get("key")
         if not key:
             return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        if not has_storage_access(request.user, bucket, key, VisibilityGrant.ACCESS_WRITE):
+            return forbidden()
 
         params = {"Bucket": bucket, "Key": key}
         version_id = get_optional_version_id(request)
@@ -246,6 +482,8 @@ class ObjectShareView(APIView):
         key = request.query_params.get("key")
         if not key:
             return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        if not has_storage_access(request.user, bucket, key):
+            return forbidden()
         try:
             expires_in = int(request.query_params.get("expires_in", 12 * 60 * 60))
         except ValueError:
@@ -282,6 +520,8 @@ class ObjectTagsView(APIView):
         key = request.query_params.get("key")
         if not key:
             return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        if not has_storage_access(request.user, bucket, key):
+            return forbidden()
 
         try:
             response = get_s3_client().get_object_tagging(Bucket=bucket, Key=key)
@@ -295,6 +535,8 @@ class ObjectTagsView(APIView):
         key = request.query_params.get("key")
         if not key:
             return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        if not has_storage_access(request.user, bucket, key, VisibilityGrant.ACCESS_WRITE):
+            return forbidden()
 
         tags = request.data.get("tags", {})
         if not isinstance(tags, dict):
@@ -318,6 +560,8 @@ class ObjectVersionsView(APIView):
         key = request.query_params.get("key")
         if not key:
             return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        if not has_storage_access(request.user, bucket, key):
+            return forbidden()
 
         try:
             response = get_s3_client().list_object_versions(Bucket=bucket, Prefix=key)
