@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from storage_api.models import UserProfile, VisibilityGrant
+from storage_api.models import AccessGroup, UserProfile, VisibilityGrant
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -59,6 +59,7 @@ class UserAdminSerializer(serializers.ModelSerializer):
 
 class VisibilityGrantSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source="user.username", read_only=True)
+    group_name = serializers.CharField(source="group.name", read_only=True)
 
     class Meta:
         model = VisibilityGrant
@@ -68,28 +69,38 @@ class VisibilityGrantSerializer(serializers.ModelSerializer):
             "role",
             "user",
             "username",
+            "group",
+            "group_name",
             "bucket",
             "prefix",
             "access",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "username", "created_at", "updated_at")
+        read_only_fields = ("id", "username", "group_name", "created_at", "updated_at")
 
     def validate(self, attrs):
         target_type = attrs.get("target_type", getattr(self.instance, "target_type", None))
         role = attrs.get("role", getattr(self.instance, "role", ""))
         user = attrs.get("user", getattr(self.instance, "user", None))
+        group = attrs.get("group", getattr(self.instance, "group", None))
         prefix = attrs.get("prefix", getattr(self.instance, "prefix", ""))
 
         if target_type == VisibilityGrant.TARGET_ROLE:
             if not role:
                 raise serializers.ValidationError({"role": "Role target requires a role."})
             attrs["user"] = None
+            attrs["group"] = None
         elif target_type == VisibilityGrant.TARGET_USER:
             if not user:
                 raise serializers.ValidationError({"user": "User target requires a user."})
             attrs["role"] = ""
+            attrs["group"] = None
+        elif target_type == VisibilityGrant.TARGET_GROUP:
+            if not group:
+                raise serializers.ValidationError({"group": "Group target requires a group."})
+            attrs["role"] = ""
+            attrs["user"] = None
         else:
             raise serializers.ValidationError({"target_type": "Invalid target type."})
 
@@ -98,12 +109,52 @@ class VisibilityGrantSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class AccessGroupSerializer(serializers.ModelSerializer):
+    users = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=get_user_model().objects.all(),
+        required=False,
+    )
+    user_details = UserAdminSerializer(source="users", many=True, read_only=True)
+
+    class Meta:
+        model = AccessGroup
+        fields = ("id", "name", "users", "user_details", "created_at", "updated_at")
+        read_only_fields = ("id", "user_details", "created_at", "updated_at")
+
+    def validate_name(self, value):
+        return value.strip()
+
+    def create(self, validated_data):
+        users = validated_data.pop("users", [])
+        group = AccessGroup.objects.create(**validated_data)
+        group.users.set(users)
+        return group
+
+    def update(self, instance, validated_data):
+        users = validated_data.pop("users", None)
+        instance.name = validated_data.get("name", instance.name)
+        instance.save()
+        if users is not None:
+            instance.users.set(users)
+        return instance
+
+
 class BucketSerializer(serializers.Serializer):
     name = serializers.RegexField(
         regex=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$",
         max_length=63,
         min_length=3,
     )
+    group_id = serializers.IntegerField(required=False, allow_null=True)
+    open_to_all = serializers.BooleanField(required=False, default=True)
+
+    def validate_group_id(self, value):
+        if value in ("", None):
+            return None
+        if not AccessGroup.objects.filter(pk=value).exists():
+            raise serializers.ValidationError("Group does not exist.")
+        return value
 
 
 class ObjectUploadSerializer(serializers.Serializer):

@@ -7,7 +7,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from storage_api.models import UserProfile, VisibilityGrant
+from storage_api.models import AccessGroup, UserProfile, VisibilityGrant
 
 
 def set_role(user, role):
@@ -50,12 +50,47 @@ class AuthAndAdminTests(TestCase):
             format="json",
         )
         self.assertEqual(token_response.status_code, 200)
+        self.assertIn("access_token", token_response.cookies)
+        self.assertTrue(token_response.cookies["access_token"]["httponly"])
+        self.assertIn("refresh_token", token_response.cookies)
+        self.assertTrue(token_response.cookies["refresh_token"]["httponly"])
+        self.assertIn("csrftoken", token_response.cookies)
 
-        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token_response.data['access']}")
         me_response = self.client.get(reverse("me"))
         self.assertEqual(me_response.status_code, 200)
         self.assertEqual(me_response.data["role"], "superuser")
         self.assertTrue(me_response.data["permissions"]["can_manage_admins"])
+
+        logout_response = self.client.post(
+            reverse("token_logout"),
+            HTTP_X_CSRFTOKEN=token_response.cookies["csrftoken"].value,
+        )
+        self.assertEqual(logout_response.status_code, 204)
+        self.assertEqual(logout_response.cookies["access_token"].value, "")
+
+    @patch("storage_api.views.get_s3_client")
+    def test_cookie_auth_requires_csrf_for_unsafe_requests(self, get_s3_client):
+        s3 = Mock()
+        get_s3_client.return_value = s3
+        client = APIClient(enforce_csrf_checks=True)
+        token_response = client.post(
+            reverse("token_obtain_pair"),
+            {"username": "root", "password": "password123"},
+            format="json",
+        )
+        self.assertEqual(token_response.status_code, 200)
+
+        forbidden_response = client.post(reverse("bucket-list-create"), {"name": "csrf-bucket"}, format="json")
+        self.assertEqual(forbidden_response.status_code, 403)
+
+        allowed_response = client.post(
+            reverse("bucket-list-create"),
+            {"name": "csrf-bucket"},
+            format="json",
+            HTTP_X_CSRFTOKEN=token_response.cookies["csrftoken"].value,
+        )
+        self.assertEqual(allowed_response.status_code, 201)
+        s3.create_bucket.assert_called_once_with(Bucket="csrf-bucket")
 
     def test_superuser_can_create_admin_editor_viewer_and_grants(self):
         self.client.force_authenticate(self.superuser)
@@ -82,6 +117,14 @@ class AuthAndAdminTests(TestCase):
         )
         self.assertEqual(grant_response.status_code, 201)
         self.assertEqual(grant_response.data["prefix"], "public/")
+
+        group_response = self.client.post(
+            reverse("group-list-create"),
+            {"name": "ops", "users": [get_user_model().objects.get(username="editoruser").id]},
+            format="json",
+        )
+        self.assertEqual(group_response.status_code, 201)
+        self.assertEqual(group_response.data["name"], "ops")
 
     def test_admin_cannot_manage_admin_or_superuser(self):
         self.client.force_authenticate(self.admin)
@@ -137,6 +180,7 @@ class StorageApiTests(TestCase):
         s3.list_objects_v2.return_value = {
             "Contents": [
                 object_fixture("public/readme.txt"),
+                object_fixture("publicity/secret.txt"),
                 object_fixture("private/secret.txt"),
                 object_fixture("editor/upload.txt"),
             ]
@@ -181,10 +225,48 @@ class StorageApiTests(TestCase):
         create_response = self.client.post(reverse("bucket-list-create"), {"name": "new-bucket"}, format="json")
         self.assertEqual(create_response.status_code, 201)
         s3.create_bucket.assert_called_once_with(Bucket="new-bucket")
+        self.assertTrue(
+            VisibilityGrant.objects.filter(
+                target_type=VisibilityGrant.TARGET_ROLE,
+                role=UserProfile.ROLE_VIEWER,
+                bucket="new-bucket",
+                access=VisibilityGrant.ACCESS_READ,
+            ).exists()
+        )
+        self.assertTrue(
+            VisibilityGrant.objects.filter(
+                target_type=VisibilityGrant.TARGET_ROLE,
+                role=UserProfile.ROLE_EDITOR,
+                bucket="new-bucket",
+                access=VisibilityGrant.ACCESS_WRITE,
+            ).exists()
+        )
 
         delete_response = self.client.delete(reverse("bucket-detail", kwargs={"bucket": "new-bucket"}))
         self.assertEqual(delete_response.status_code, 204)
         s3.delete_bucket.assert_called_once_with(Bucket="new-bucket")
+
+    @patch("storage_api.views.get_s3_client")
+    def test_bucket_can_be_restricted_to_group(self, get_s3_client):
+        self.client.force_authenticate(self.admin)
+        self.mock_s3(get_s3_client)
+        group = AccessGroup.objects.create(name="ops")
+        group.users.add(self.editor)
+
+        response = self.client.post(
+            reverse("bucket-list-create"),
+            {"name": "team-bucket", "group_id": group.id, "open_to_all": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(
+            VisibilityGrant.objects.filter(
+                target_type=VisibilityGrant.TARGET_GROUP,
+                group=group,
+                bucket="team-bucket",
+                access=VisibilityGrant.ACCESS_WRITE,
+            ).exists()
+        )
 
     @patch("storage_api.views.get_s3_client")
     def test_viewer_sees_nothing_without_grants(self, get_s3_client):
@@ -243,6 +325,58 @@ class StorageApiTests(TestCase):
         )
         self.assertEqual(delete_response.status_code, 403)
         s3.delete_object.assert_not_called()
+
+    @patch("storage_api.views.get_s3_client")
+    def test_prefix_grant_matches_path_boundary(self, get_s3_client):
+        self.client.force_authenticate(self.viewer)
+        self.mock_s3(get_s3_client)
+        VisibilityGrant.objects.create(
+            target_type=VisibilityGrant.TARGET_ROLE,
+            role=UserProfile.ROLE_VIEWER,
+            bucket="docs",
+            prefix="public",
+            access=VisibilityGrant.ACCESS_READ,
+        )
+
+        list_response = self.client.get(reverse("object-list-create-delete", kwargs={"bucket": "docs"}))
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual([item["key"] for item in list_response.data["objects"]], ["public/readme.txt"])
+
+        exact_response = self.client.get(
+            reverse("object-download", kwargs={"bucket": "docs"}),
+            {"key": "public"},
+        )
+        self.assertEqual(exact_response.status_code, 200)
+
+        boundary_response = self.client.get(
+            reverse("object-download", kwargs={"bucket": "docs"}),
+            {"key": "publicity/secret.txt"},
+        )
+        self.assertEqual(boundary_response.status_code, 403)
+
+    @patch("storage_api.views.get_s3_client")
+    def test_object_list_uses_bounded_pagination_parameters(self, get_s3_client):
+        self.client.force_authenticate(self.admin)
+        s3 = self.mock_s3(get_s3_client)
+        s3.list_objects_v2.return_value = {
+            "Contents": [object_fixture("public/readme.txt")],
+            "IsTruncated": True,
+            "NextContinuationToken": "next-page",
+        }
+
+        response = self.client.get(
+            reverse("object-list-create-delete", kwargs={"bucket": "docs"}),
+            {"prefix": "public/", "continuation_token": "page-1", "max_keys": "25"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["is_truncated"])
+        self.assertEqual(response.data["next_continuation_token"], "next-page")
+        s3.list_objects_v2.assert_called_once_with(
+            Bucket="docs",
+            MaxKeys=25,
+            Prefix="public/",
+            ContinuationToken="page-1",
+        )
 
     @patch("storage_api.views.get_s3_client")
     def test_editor_write_prefix_and_user_specific_grants(self, get_s3_client):

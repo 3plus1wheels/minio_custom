@@ -3,6 +3,7 @@ import mimetypes
 from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.middleware.csrf import get_token
 from django.http import FileResponse
 from django.db.models import Q
 from django.utils.dateparse import parse_datetime
@@ -10,10 +11,14 @@ from django.utils.timezone import is_naive, make_aware
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 
-from storage_api.models import UserProfile, VisibilityGrant
+from storage_api.models import AccessGroup, UserProfile, VisibilityGrant
 from storage_api.minio_client import get_s3_client
 from storage_api.serializers import (
+    AccessGroupSerializer,
     BucketSerializer,
     ObjectUploadSerializer,
     RegisterSerializer,
@@ -37,6 +42,15 @@ def guess_content_type(key):
 def get_optional_version_id(request):
     version_id = request.query_params.get("version_id")
     return version_id if version_id not in ("", None) else None
+
+
+def get_bounded_max_keys(request, default=100, minimum=1, maximum=1000):
+    raw_max_keys = request.query_params.get("max_keys", default)
+    try:
+        max_keys = int(raw_max_keys)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(max_keys, maximum))
 
 
 def forbidden(message="You do not have permission to perform this action."):
@@ -78,6 +92,16 @@ def normalize_prefix(prefix):
     return str(prefix or "").strip().lstrip("/")
 
 
+def prefix_matches_key(prefix, key):
+    normalized_prefix = normalize_prefix(prefix)
+    normalized_key = normalize_prefix(key)
+    if not normalized_prefix:
+        return True
+    if normalized_prefix.endswith("/"):
+        return normalized_key.startswith(normalized_prefix)
+    return normalized_key == normalized_prefix or normalized_key.startswith(f"{normalized_prefix}/")
+
+
 def grants_for_user(user, bucket=None):
     if is_admin(user):
         return VisibilityGrant.objects.none()
@@ -85,6 +109,9 @@ def grants_for_user(user, bucket=None):
     query = Q(target_type=VisibilityGrant.TARGET_ROLE, role=role) | Q(
         target_type=VisibilityGrant.TARGET_USER,
         user=user,
+    ) | Q(
+        target_type=VisibilityGrant.TARGET_GROUP,
+        group__users=user,
     )
     grants = VisibilityGrant.objects.filter(query)
     if bucket is not None:
@@ -101,7 +128,7 @@ def has_storage_access(user, bucket, key="", access=VisibilityGrant.ACCESS_READ)
     normalized_key = normalize_prefix(key)
     for grant in grants_for_user(user, bucket).filter(access__in=allowed_access):
         prefix = normalize_prefix(grant.prefix)
-        if not normalized_key or not prefix or normalized_key.startswith(prefix):
+        if not normalized_key or prefix_matches_key(prefix, normalized_key):
             return True
     return False
 
@@ -122,7 +149,7 @@ def filter_objects_for_user(user, bucket, objects):
     return [
         item
         for item in objects
-        if any(item.get("key", "").startswith(prefix) for prefix in allowed_prefixes)
+        if any(prefix_matches_key(prefix, item.get("key", "")) for prefix in allowed_prefixes)
     ]
 
 
@@ -144,6 +171,82 @@ class RegisterView(generics.CreateAPIView):
             {"detail": "Public registration is disabled. Ask an administrator to create an account."},
             status=status.HTTP_403_FORBIDDEN,
         )
+
+
+def set_auth_cookies(response, access_token, refresh_token=None):
+    response.set_cookie(
+        settings.JWT_ACCESS_COOKIE_NAME,
+        access_token,
+        httponly=True,
+        secure=settings.JWT_COOKIE_SECURE,
+        samesite=settings.JWT_COOKIE_SAMESITE,
+    )
+    if refresh_token:
+        response.set_cookie(
+            settings.JWT_REFRESH_COOKIE_NAME,
+            refresh_token,
+            httponly=True,
+            secure=settings.JWT_COOKIE_SECURE,
+            samesite=settings.JWT_COOKIE_SAMESITE,
+        )
+
+
+def clear_auth_cookies(response):
+    response.delete_cookie(
+        settings.JWT_ACCESS_COOKIE_NAME,
+        samesite=settings.JWT_COOKIE_SAMESITE,
+    )
+    response.delete_cookie(
+        settings.JWT_REFRESH_COOKIE_NAME,
+        samesite=settings.JWT_COOKIE_SAMESITE,
+    )
+
+
+class CookieTokenObtainPairView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = TokenObtainPairSerializer(data=request.data)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as exc:
+            raise InvalidToken(exc.args[0])
+
+        response = Response({"detail": "Authenticated."})
+        get_token(request)
+        set_auth_cookies(response, serializer.validated_data["access"], serializer.validated_data["refresh"])
+        return response
+
+
+class CookieTokenRefreshView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        data = request.data.copy()
+        if not data.get("refresh"):
+            data["refresh"] = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME, "")
+        serializer = TokenRefreshSerializer(data=data)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as exc:
+            raise InvalidToken(exc.args[0])
+
+        response = Response({"detail": "Refreshed."})
+        set_auth_cookies(response, serializer.validated_data["access"])
+        return response
+
+
+class CookieTokenLogoutView(APIView):
+    def post(self, request):
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        refresh_token = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
+        if refresh_token:
+            try:
+                RefreshToken(refresh_token).blacklist()
+            except (AttributeError, TokenError):
+                pass
+        clear_auth_cookies(response)
+        return response
 
 
 class MeView(APIView):
@@ -260,6 +363,48 @@ class VisibilityGrantView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class AccessGroupView(APIView):
+    def get(self, request, group_id=None):
+        if not is_admin(request.user):
+            return forbidden()
+        if group_id:
+            try:
+                group = AccessGroup.objects.get(pk=group_id)
+            except AccessGroup.DoesNotExist:
+                return Response({"detail": "Group not found."}, status=404)
+            return Response(AccessGroupSerializer(group).data)
+        return Response({"groups": AccessGroupSerializer(AccessGroup.objects.all(), many=True).data})
+
+    def post(self, request):
+        if not is_admin(request.user):
+            return forbidden()
+        serializer = AccessGroupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        group = serializer.save()
+        return Response(AccessGroupSerializer(group).data, status=status.HTTP_201_CREATED)
+
+    def patch(self, request, group_id):
+        if not is_admin(request.user):
+            return forbidden()
+        try:
+            group = AccessGroup.objects.get(pk=group_id)
+        except AccessGroup.DoesNotExist:
+            return Response({"detail": "Group not found."}, status=404)
+        serializer = AccessGroupSerializer(group, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        return Response(AccessGroupSerializer(serializer.save()).data)
+
+    def delete(self, request, group_id):
+        if not is_admin(request.user):
+            return forbidden()
+        try:
+            group = AccessGroup.objects.get(pk=group_id)
+        except AccessGroup.DoesNotExist:
+            return Response({"detail": "Group not found."}, status=404)
+        group.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class BucketListCreateView(APIView):
     def get(self, request):
         try:
@@ -283,13 +428,42 @@ class BucketListCreateView(APIView):
         serializer = BucketSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         bucket_name = serializer.validated_data["name"]
+        group_id = serializer.validated_data.get("group_id")
+        open_to_all = serializer.validated_data.get("open_to_all", True)
 
         try:
             get_s3_client().create_bucket(Bucket=bucket_name)
         except (ClientError, BotoCoreError) as exc:
             return error_response(exc)
 
-        return Response({"name": bucket_name}, status=status.HTTP_201_CREATED)
+        if group_id:
+            VisibilityGrant.objects.get_or_create(
+                target_type=VisibilityGrant.TARGET_GROUP,
+                group_id=group_id,
+                bucket=bucket_name,
+                prefix="",
+                access=VisibilityGrant.ACCESS_WRITE,
+                defaults={"role": "", "user": None},
+            )
+        elif open_to_all:
+            VisibilityGrant.objects.get_or_create(
+                target_type=VisibilityGrant.TARGET_ROLE,
+                role=UserProfile.ROLE_VIEWER,
+                bucket=bucket_name,
+                prefix="",
+                access=VisibilityGrant.ACCESS_READ,
+                defaults={"user": None},
+            )
+            VisibilityGrant.objects.get_or_create(
+                target_type=VisibilityGrant.TARGET_ROLE,
+                role=UserProfile.ROLE_EDITOR,
+                bucket=bucket_name,
+                prefix="",
+                access=VisibilityGrant.ACCESS_WRITE,
+                defaults={"user": None},
+            )
+
+        return Response({"name": bucket_name, "group_id": group_id, "open_to_all": open_to_all}, status=status.HTTP_201_CREATED)
 
 
 class BucketDetailView(APIView):
@@ -404,8 +578,19 @@ class ObjectView(APIView):
 
         if not has_storage_access(request.user, bucket):
             return forbidden()
+        list_params = {
+            "Bucket": bucket,
+            "MaxKeys": get_bounded_max_keys(request),
+        }
+        prefix = normalize_prefix(request.query_params.get("prefix", ""))
+        continuation_token = request.query_params.get("continuation_token")
+        if prefix:
+            list_params["Prefix"] = prefix
+        if continuation_token:
+            list_params["ContinuationToken"] = continuation_token
+
         try:
-            response = get_s3_client().list_objects_v2(Bucket=bucket)
+            response = get_s3_client().list_objects_v2(**list_params)
         except (ClientError, BotoCoreError) as exc:
             return error_response(exc)
 
@@ -433,6 +618,8 @@ class ObjectView(APIView):
             {
                 "objects": objects,
                 "writable_prefixes": writable_prefixes_for_user(request.user, bucket),
+                "next_continuation_token": response.get("NextContinuationToken") or "",
+                "is_truncated": response.get("IsTruncated", False),
             }
         )
 

@@ -35,7 +35,9 @@ import { defaultStyles, FileIcon } from "react-file-icon";
 import {
   createUser,
   createBucket,
+  createGroup,
   createVisibilityGrant,
+  deleteGroup,
   deactivateUser,
   deleteVisibilityGrant,
   deleteObject,
@@ -43,14 +45,17 @@ import {
   getMe,
   getObjectTags,
   listBuckets,
+  listGroups,
   listObjects,
   listObjectVersions,
   listUsers,
   listVisibilityGrants,
   login,
+  logout,
   rewindBucket,
   saveObjectTags,
   shareObject,
+  updateGroup,
   updateUser,
   uploadObject,
 } from "./api";
@@ -148,6 +153,18 @@ function normalizeFolderPath(value) {
     .map((part) => part.trim())
     .filter(Boolean)
     .join("/");
+}
+
+function normalizePrefix(value) {
+  return String(value || "").trim().replace(/^\/+/, "");
+}
+
+function prefixMatchesKey(prefix, key) {
+  const normalizedPrefix = normalizePrefix(prefix);
+  const normalizedKey = normalizePrefix(key);
+  if (!normalizedPrefix) return true;
+  if (normalizedPrefix.endsWith("/")) return normalizedKey.startsWith(normalizedPrefix);
+  return normalizedKey === normalizedPrefix || normalizedKey.startsWith(`${normalizedPrefix}/`);
 }
 
 function getObjectDisplayName(key = "", prefix = "") {
@@ -296,6 +313,7 @@ function WaveCanvas() {
 function AdminPanel({
   currentUser,
   users,
+  groups,
   grants,
   buckets,
   newUser,
@@ -306,12 +324,36 @@ function AdminPanel({
   onCreateUser,
   onUpdateUser,
   onDeactivateUser,
+  onCreateGroup,
+  onUpdateGroup,
+  onDeleteGroup,
   onCreateGrant,
   onDeleteGrant,
   onRefresh,
 }) {
   const grantTargetUsers = users.filter((user) => user.role === "editor" || user.role === "viewer");
   const canManageAdmins = Boolean(currentUser?.permissions?.can_manage_admins);
+  const selectedGrantBuckets = Array.isArray(newGrant.buckets) ? newGrant.buckets : [];
+  const areAllGrantBucketsSelected = buckets.length > 0 && buckets.every((bucket) => selectedGrantBuckets.includes(bucket.name));
+
+  function toggleGrantBucket(bucketName) {
+    setNewGrant((grant) => {
+      const current = Array.isArray(grant.buckets) ? grant.buckets : [];
+      return {
+        ...grant,
+        buckets: current.includes(bucketName)
+          ? current.filter((name) => name !== bucketName)
+          : [...current, bucketName],
+      };
+    });
+  }
+
+  function toggleAllGrantBuckets() {
+    setNewGrant((grant) => ({
+      ...grant,
+      buckets: areAllGrantBucketsSelected ? [] : buckets.map((bucket) => bucket.name),
+    }));
+  }
 
   return (
     <section className="admin-panel" aria-label="Admin management">
@@ -393,6 +435,64 @@ function AdminPanel({
         </section>
 
         <section className="admin-section">
+          <h3>Groups</h3>
+          <form className="admin-form group-create-form" onSubmit={onCreateGroup}>
+            <input required name="name" placeholder="Group name" />
+            <fieldset className="bucket-multi-field user-multi-field">
+              <legend>Members</legend>
+              <div className="bucket-multi-list">
+                {users
+                  .filter((user) => user.role === "editor" || user.role === "viewer")
+                  .map((user) => (
+                    <label key={user.id}>
+                      <input name="users" type="checkbox" value={user.id} />
+                      {user.username}
+                    </label>
+                  ))}
+              </div>
+            </fieldset>
+            <button className="primary" type="submit">Create Group</button>
+          </form>
+
+          <div className="admin-table groups-table">
+            <div className="admin-row admin-row-head">
+              <span>Group</span>
+              <span>Members</span>
+              <span>Actions</span>
+            </div>
+            {groups.length ? groups.map((group) => (
+              <form className="admin-row" key={group.id} onSubmit={(event) => onUpdateGroup(event, group.id)}>
+                <input name="name" defaultValue={group.name} aria-label={`${group.name} group name`} />
+                <fieldset className="bucket-multi-field user-multi-field">
+                  <legend>Members</legend>
+                  <div className="bucket-multi-list">
+                    {users
+                      .filter((user) => user.role === "editor" || user.role === "viewer")
+                      .map((user) => (
+                        <label key={user.id}>
+                          <input
+                            name="users"
+                            type="checkbox"
+                            value={user.id}
+                            defaultChecked={(group.user_details || []).some((member) => member.id === user.id)}
+                          />
+                          {user.username}
+                        </label>
+                      ))}
+                  </div>
+                </fieldset>
+                <div className="admin-row-actions">
+                  <button type="submit" title={`Save ${group.name}`}>Save</button>
+                  <button type="button" title={`Delete ${group.name}`} onClick={() => onDeleteGroup(group)}>
+                    Delete
+                  </button>
+                </div>
+              </form>
+            )) : <p className="admin-empty">No groups yet.</p>}
+          </div>
+        </section>
+
+        <section className="admin-section">
           <h3>Visibility Grants</h3>
           <form className="admin-form grant-form" onSubmit={onCreateGrant}>
             <select
@@ -401,6 +501,7 @@ function AdminPanel({
             >
               <option value="role">Role</option>
               <option value="user">User</option>
+              <option value="group">Group</option>
             </select>
             {newGrant.target_type === "role" ? (
               <select
@@ -410,7 +511,7 @@ function AdminPanel({
                 <option value="viewer">Viewer</option>
                 <option value="editor">Editor</option>
               </select>
-            ) : (
+            ) : newGrant.target_type === "user" ? (
               <select
                 required
                 value={newGrant.user}
@@ -421,17 +522,41 @@ function AdminPanel({
                   <option key={user.id} value={user.id}>{user.username}</option>
                 ))}
               </select>
+            ) : (
+              <select
+                required
+                value={newGrant.group}
+                onChange={(event) => setNewGrant((grant) => ({ ...grant, group: event.target.value }))}
+              >
+                <option value="">Choose group</option>
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>{group.name}</option>
+                ))}
+              </select>
             )}
-            <input
-              required
-              list="bucket-names"
-              placeholder="Bucket"
-              value={newGrant.bucket}
-              onChange={(event) => setNewGrant((grant) => ({ ...grant, bucket: event.target.value }))}
-            />
-            <datalist id="bucket-names">
-              {buckets.map((bucket) => <option key={bucket.name} value={bucket.name} />)}
-            </datalist>
+            <fieldset className="bucket-multi-field">
+              <legend>Bucket</legend>
+              <label className="bucket-multi-all">
+                <input
+                  type="checkbox"
+                  checked={areAllGrantBucketsSelected}
+                  onChange={toggleAllGrantBuckets}
+                />
+                All buckets
+              </label>
+              <div className="bucket-multi-list">
+                {buckets.map((bucket) => (
+                  <label key={bucket.name}>
+                    <input
+                      type="checkbox"
+                      checked={selectedGrantBuckets.includes(bucket.name)}
+                      onChange={() => toggleGrantBucket(bucket.name)}
+                    />
+                    {bucket.name}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
             <input
               placeholder="Prefix, blank = whole bucket"
               value={newGrant.prefix}
@@ -444,7 +569,7 @@ function AdminPanel({
               <option value="read">Read</option>
               <option value="write">Write</option>
             </select>
-            <button className="primary" type="submit">Create Grant</button>
+            <button className="primary" type="submit" disabled={!selectedGrantBuckets.length}>Create Grant</button>
           </form>
 
           <div className="admin-table grants-table">
@@ -459,7 +584,9 @@ function AdminPanel({
                 <span>
                   {grant.target_type === "role"
                     ? `Role: ${grant.role}`
-                    : `User: ${grant.username || grant.user}`}
+                    : grant.target_type === "group"
+                      ? `Group: ${grant.group_name || grant.group}`
+                      : `User: ${grant.username || grant.user}`}
                 </span>
                 <span>{grant.bucket}/{grant.prefix || "*"}</span>
                 <span>{grant.access}</span>
@@ -478,8 +605,8 @@ function AdminPanel({
 }
 
 function App() {
-  const [accessToken, setAccessToken] = useState(() => localStorage.getItem("accessToken") || "");
-  const accessTokenRef = useRef(accessToken);
+  const [isAuthenticated, setAuthenticated] = useState(false);
+  const [isCheckingSession, setCheckingSession] = useState(true);
   const [route, setRoute] = useState(getRoute);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -487,11 +614,7 @@ function App() {
   const [status, setStatus] = useState("");
   const [isSubmitting, setSubmitting] = useState(false);
 
-  const canSubmit = username.trim() && password.length >= 8 && !isSubmitting;
-
-  useEffect(() => {
-    accessTokenRef.current = accessToken;
-  }, [accessToken]);
+  const canSubmit = username.trim() && password.length >= 8 && !isSubmitting && !isCheckingSession;
 
   useEffect(() => {
     const handleRouteChange = () => setRoute(getRoute());
@@ -500,9 +623,30 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!accessToken && route.page !== "login") pushRoute("/login");
-    if (accessToken && route.page === "login") pushRoute("/browser");
-  }, [accessToken, route.page]);
+    let isMounted = true;
+    getMe()
+      .then(() => {
+        if (!isMounted) return;
+        setAuthenticated(true);
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        setAuthenticated(false);
+      })
+      .finally(() => {
+        if (!isMounted) return;
+        setCheckingSession(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isCheckingSession) return;
+    if (!isAuthenticated && route.page !== "login") pushRoute("/login");
+    if (isAuthenticated && route.page === "login") pushRoute("/browser");
+  }, [isAuthenticated, isCheckingSession, route.page]);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--app-scale", "0.75");
@@ -515,10 +659,8 @@ function App() {
     setStatus("");
 
     try {
-      const tokens = await login(username.trim(), password);
-      localStorage.setItem("accessToken", tokens.access);
-      localStorage.setItem("refreshToken", tokens.refresh);
-      setAccessToken(tokens.access);
+      await login(username.trim(), password);
+      setAuthenticated(true);
       setStatus("");
       pushRoute("/browser");
     } catch (error) {
@@ -528,37 +670,38 @@ function App() {
     }
   }
 
-  function handleAuthExpired(expiredToken) {
-    if (expiredToken && expiredToken !== accessTokenRef.current) return;
-
-    localStorage.removeItem("accessToken");
-    localStorage.removeItem("refreshToken");
-    setAccessToken("");
+  function handleAuthExpired() {
+    setAuthenticated(false);
     setPassword("");
     setStatus("Session expired. Login again.");
     pushRoute("/login");
   }
 
-  if (accessToken) {
+  async function handleSignOut() {
+    try {
+      await logout();
+    } catch (_error) {
+      // Session may already be gone; local state still needs clearing.
+    }
+    setAuthenticated(false);
+    setPassword("");
+    pushRoute("/login");
+  }
+
+  if (!isCheckingSession && isAuthenticated) {
     return (
       <ObjectBrowser
         routeBucket={route.bucket}
-        token={accessToken}
-        onAuthExpired={() => handleAuthExpired(accessToken)}
+        token=""
+        onAuthExpired={handleAuthExpired}
         onSelectBucket={(bucket) => pushRoute(`/browser/${encodeURIComponent(bucket)}`)}
-        onSignOut={() => {
-          localStorage.removeItem("accessToken");
-          localStorage.removeItem("refreshToken");
-          setAccessToken("");
-          setPassword("");
-          pushRoute("/login");
-        }}
+        onSignOut={handleSignOut}
       />
     );
   }
 
   return (
-    <main className="auth-shell">
+    <main className="auth-shell auth-login-shell">
       <section className="auth-copy" aria-label="Product overview">
         <div className="copy-content">
           <h1>High-Performance Object Store</h1>
@@ -613,7 +756,7 @@ function App() {
             disabled={!canSubmit}
             title="Login to object browser"
           >
-            {isSubmitting ? "Working..." : "Login"}
+            {isCheckingSession ? "Checking..." : isSubmitting ? "Working..." : "Login"}
           </button>
 
           {status ? <p className="form-status">{status}</p> : null}
@@ -642,6 +785,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   const [isTransfersOpen, setTransfersOpen] = useState(false);
   const [isUploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [bucketName, setBucketName] = useState("");
+  const [bucketGroupId, setBucketGroupId] = useState("");
   const [newFolderPath, setNewFolderPath] = useState("");
   const [shareDays, setShareDays] = useState(0);
   const [shareHours, setShareHours] = useState(12);
@@ -665,6 +809,8 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   const [buckets, setBuckets] = useState([]);
   const [selectedBucket, setSelectedBucket] = useState("");
   const [objects, setObjects] = useState([]);
+  const [nextContinuationToken, setNextContinuationToken] = useState("");
+  const [isObjectListTruncated, setObjectListTruncated] = useState(false);
   const [rewindObjects, setRewindObjects] = useState([]);
   const [isRewindMode, setRewindMode] = useState(false);
   const [rewindAppliedAt, setRewindAppliedAt] = useState("");
@@ -693,13 +839,15 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   const [currentUser, setCurrentUser] = useState(null);
   const [activeView, setActiveView] = useState("browser");
   const [adminUsers, setAdminUsers] = useState([]);
+  const [accessGroups, setAccessGroups] = useState([]);
   const [visibilityGrants, setVisibilityGrants] = useState([]);
   const [newUser, setNewUser] = useState({ username: "", password: "", role: "viewer" });
   const [newGrant, setNewGrant] = useState({
     target_type: "role",
     role: "viewer",
     user: "",
-    bucket: "",
+    group: "",
+    buckets: [],
     prefix: "",
     access: "read",
   });
@@ -716,7 +864,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     hasGlobalWrite ||
     writablePrefixes.some((grantPrefix) => {
       if (!grantPrefix) return true;
-      return prefix.startsWith(grantPrefix);
+      return prefixMatchesKey(grantPrefix, prefix);
     });
   const canWriteKey = (key = "") => canWritePrefix(key);
   const canWriteCurrentPrefix = canWritePrefix(currentPrefix);
@@ -805,12 +953,14 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     if (!canManageUsers) return;
     setAdminLoading(true);
     try {
-      const [usersData, grantsData] = await Promise.all([
+      const [usersData, grantsData, groupsData] = await Promise.all([
         listUsers(token),
         listVisibilityGrants(token),
+        listGroups(token),
       ]);
       setAdminUsers(usersData.users || []);
       setVisibilityGrants(grantsData.grants || []);
+      setAccessGroups(groupsData.groups || []);
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -880,28 +1030,92 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     }
   }
 
-  async function handleCreateGrant(event) {
+  async function handleCreateGroup(event) {
     event.preventDefault();
+    const form = new FormData(event.currentTarget);
     const payload = {
-      target_type: newGrant.target_type,
-      role: newGrant.target_type === "role" ? newGrant.role : "",
-      user: newGrant.target_type === "user" ? Number(newGrant.user) : null,
-      bucket: newGrant.bucket.trim(),
-      prefix: newGrant.prefix.trim(),
-      access: newGrant.access,
+      name: String(form.get("name") || "").trim(),
+      users: form.getAll("users").map((id) => Number(id)),
     };
     try {
-      const grant = await createVisibilityGrant(token, payload);
-      setVisibilityGrants((items) => [...items, grant]);
+      const group = await createGroup(token, payload);
+      setAccessGroups((items) => [...items, group].sort((a, b) => a.name.localeCompare(b.name)));
+      event.currentTarget.reset();
+      setStatus(`Group "${group.name}" created.`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleUpdateGroup(event, groupId) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = {
+      name: String(form.get("name") || "").trim(),
+      users: form.getAll("users").map((id) => Number(id)),
+    };
+    try {
+      const group = await updateGroup(token, groupId, payload);
+      setAccessGroups((items) => items.map((item) => (item.id === group.id ? group : item)));
+      setStatus(`Group "${group.name}" updated.`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleDeleteGroup(group) {
+    if (!window.confirm(`Delete group "${group.name}"? Grants for this group will also be removed.`)) return;
+    try {
+      await deleteGroup(token, group.id);
+      setAccessGroups((items) => items.filter((item) => item.id !== group.id));
+      setVisibilityGrants((items) => items.filter((item) => item.group !== group.id));
+      setStatus(`Group "${group.name}" deleted.`);
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleCreateGrant(event) {
+    event.preventDefault();
+    const selectedBuckets = Array.isArray(newGrant.buckets) ? newGrant.buckets : [];
+    if (!selectedBuckets.length) return;
+    try {
+      const createdGrants = [];
+      for (const bucket of selectedBuckets) {
+        const payload = {
+          target_type: newGrant.target_type,
+          role: newGrant.target_type === "role" ? newGrant.role : "",
+          user: newGrant.target_type === "user" ? Number(newGrant.user) : null,
+          group: newGrant.target_type === "group" ? Number(newGrant.group) : null,
+          bucket,
+          prefix: newGrant.prefix.trim(),
+          access: newGrant.access,
+        };
+        createdGrants.push(await createVisibilityGrant(token, payload));
+      }
+      setVisibilityGrants((items) => [...items, ...createdGrants]);
       setNewGrant({
         target_type: "role",
         role: "viewer",
         user: "",
-        bucket: "",
+        group: "",
+        buckets: [],
         prefix: "",
         access: "read",
       });
-      setStatus("Visibility grant created.");
+      setStatus(`Created ${createdGrants.length} visibility grant${createdGrants.length === 1 ? "" : "s"}.`);
       await refreshBuckets();
     } catch (error) {
       if (error.status === 401) {
@@ -989,6 +1203,8 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     setRewindObjects([]);
     setRewindAppliedAt("");
     setPendingFolders([]);
+    setNextContinuationToken("");
+    setObjectListTruncated(false);
     setPathCopied(false);
   }, [selectedBucket]);
 
@@ -1028,17 +1244,20 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     }
   }
 
-  async function refreshObjects(bucket) {
+  async function refreshObjects(bucket, { append = false, continuationToken = "" } = {}) {
     setLoading(true);
     setStatus("");
     try {
-      const data = await listObjects(token, bucket);
+      const data = await listObjects(token, bucket, { continuationToken });
       const nextObjects = data.objects || [];
-      setObjects(nextObjects);
+      const combinedObjects = append ? [...objects, ...nextObjects] : nextObjects;
+      setObjects(combinedObjects);
       setWritablePrefixes(data.writable_prefixes || []);
+      setNextContinuationToken(data.next_continuation_token || "");
+      setObjectListTruncated(Boolean(data.is_truncated));
       setSelectedObject((current) => {
         if (!current) return null;
-        const nextSelected = nextObjects.find((item) => item.key === current.key);
+        const nextSelected = combinedObjects.find((item) => item.key === current.key);
         if (!nextSelected) return null;
         return {
           ...nextSelected,
@@ -1047,7 +1266,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
         };
       });
       setPendingFolders((folders) =>
-        folders.filter((folder) => !nextObjects.some((item) => item.key.startsWith(folder)))
+        folders.filter((folder) => !combinedObjects.some((item) => item.key.startsWith(folder)))
       );
     } catch (error) {
       if (error.status === 401) {
@@ -1058,6 +1277,11 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     } finally {
       setLoading(false);
     }
+  }
+
+  function loadMoreObjects() {
+    if (!selected?.name || !nextContinuationToken || isRewindMode) return;
+    refreshObjects(selected.name, { append: true, continuationToken: nextContinuationToken });
   }
 
   function clearRewindData() {
@@ -1107,7 +1331,10 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     setStatus("");
 
     try {
-      const bucket = await createBucket(token, normalizedName);
+      const bucket = await createBucket(token, normalizedName, {
+        group_id: bucketGroupId ? Number(bucketGroupId) : null,
+        open_to_all: !bucketGroupId,
+      });
       const created = {
         name: bucket.name,
         createdAt: new Date().toISOString(),
@@ -1116,6 +1343,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
       setSelectedBucket(bucket.name);
       onSelectBucket(bucket.name);
       setBucketName("");
+      setBucketGroupId("");
       setModalOpen(false);
       setStatus(`Bucket "${bucket.name}" created.`);
     } catch (error) {
@@ -1747,6 +1975,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
             <AdminPanel
               currentUser={currentUser}
               users={adminUsers}
+              groups={accessGroups}
               grants={visibilityGrants}
               buckets={buckets}
               newUser={newUser}
@@ -1757,6 +1986,9 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
               onCreateUser={handleCreateUser}
               onUpdateUser={handleUpdateUser}
               onDeactivateUser={handleDeactivateUser}
+              onCreateGroup={handleCreateGroup}
+              onUpdateGroup={handleUpdateGroup}
+              onDeleteGroup={handleDeleteGroup}
               onCreateGrant={handleCreateGrant}
               onDeleteGrant={handleDeleteGrant}
               onRefresh={refreshAdminData}
@@ -2076,6 +2308,18 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                         </button>
                       </div>
                     ))}
+                    {!isRewindMode && isObjectListTruncated ? (
+                      <div className="object-list-footer">
+                        <button
+                          type="button"
+                          disabled={isLoading}
+                          title="Load next page of objects"
+                          onClick={loadMoreObjects}
+                        >
+                          {isLoading ? "Loading..." : "Load more"}
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 )}
 
@@ -2324,11 +2568,27 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
                 placeholder="my-bucket"
               />
             </label>
+            <label>
+              <span>Access Group</span>
+              <select
+                value={bucketGroupId}
+                onChange={(event) => setBucketGroupId(event.target.value)}
+              >
+                <option value="">Open to everyone</option>
+                {accessGroups.map((group) => (
+                  <option key={group.id} value={group.id}>{group.name}</option>
+                ))}
+              </select>
+            </label>
+            <p className="modal-help">
+              Default opens bucket to all viewers/editors. Pick a group to restrict access to that group.
+            </p>
             {bucketName && !isValidBucketName ? <p className="modal-help invalid">Invalid bucket name</p> : null}
             {status ? <p className="modal-status">{status}</p> : null}
             <div className="modal-actions">
               <button type="button" title="Clear bucket name" onClick={() => {
                 setBucketName("");
+                setBucketGroupId("");
                 setStatus("");
               }}>Clear</button>
               <button className="primary" disabled={!canCreate} title="Create bucket">

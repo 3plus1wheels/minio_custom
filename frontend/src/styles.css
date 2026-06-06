@@ -95,15 +95,22 @@ button:focus-visible {
   inset: auto 0 0;
   width: 100%;
   height: 58%;
+  pointer-events: none;
 }
 
 .auth-panel {
+  position: relative;
+  z-index: 1;
   min-height: var(--scaled-viewport-height);
   display: flex;
   flex-direction: column;
   padding: 82px 72px 56px;
   background: #ffffff;
   box-shadow: -20px 0 40px rgba(12, 17, 24, 0.08);
+}
+
+#root:has(.auth-login-shell) .modal-backdrop {
+  display: none;
 }
 
 .brand-lockup {
@@ -618,7 +625,13 @@ button:focus-visible {
 }
 
 .admin-form.grant-form {
-  grid-template-columns: 110px 160px minmax(140px, 1fr) minmax(180px, 1.5fr) 110px 140px;
+  grid-template-columns: 110px 160px minmax(220px, 1fr) minmax(180px, 1.5fr) 110px 140px;
+  align-items: start;
+}
+
+.admin-form.group-create-form {
+  grid-template-columns: minmax(180px, 1fr) minmax(260px, 2fr) 150px;
+  align-items: start;
 }
 
 .admin-form input,
@@ -632,6 +645,47 @@ button:focus-visible {
   padding: 0 10px;
   color: #172026;
   background: #ffffff;
+}
+
+.bucket-multi-field {
+  min-width: 0;
+  min-height: 40px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #cbd4dd;
+  border-radius: 4px;
+  color: #172026;
+  background: #ffffff;
+}
+
+.bucket-multi-field legend {
+  padding: 0 4px;
+  color: #66727d;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.bucket-multi-all,
+.bucket-multi-list label {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1d3448;
+}
+
+.bucket-multi-list {
+  max-height: 116px;
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  padding-top: 4px;
+}
+
+.bucket-multi-field input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
 }
 
 .admin-form .primary,
@@ -657,6 +711,10 @@ button:focus-visible {
 
 .grants-table .admin-row {
   grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.5fr) 100px 120px;
+}
+
+.groups-table .admin-row {
+  grid-template-columns: minmax(180px, 1fr) minmax(260px, 2fr) 180px;
 }
 
 .admin-row:last-child {
@@ -1227,6 +1285,17 @@ button:focus-visible {
 
 .object-row:last-child {
   border-bottom: 0;
+}
+
+.object-list-footer {
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+  background: #ffffff;
+}
+
+.object-list-footer button {
+  min-width: 128px;
 }
 
 .object-row-header {
@@ -1812,14 +1881,25 @@ button:focus-visible {
 .modal-backdrop {
   position: fixed;
   inset: 0;
+  z-index: 30;
   display: grid;
   place-items: center;
   padding: 24px;
   background: rgba(0, 0, 0, 0.35);
 }
 
+.bucket-modal,
+.path-modal,
+.preview-modal,
+.share-modal,
+.tags-modal,
+.rewind-modal {
+  position: relative;
+  z-index: 31;
+}
+
 .preview-backdrop {
-  z-index: 20;
+  z-index: 40;
   align-items: start;
   padding: 10px 12px;
   background: rgba(0, 0, 0, 0.38);
@@ -2462,6 +2542,7 @@ button:focus-visible {
 }
 
 .bucket-modal input,
+.bucket-modal select,
 .bucket-modal textarea {
   height: 65px;
   padding: 0 12px;
@@ -2479,6 +2560,7 @@ button:focus-visible {
 }
 
 .bucket-modal input:focus,
+.bucket-modal select:focus,
 .bucket-modal textarea:focus {
   border-color: #c7334a;
   box-shadow: 0 0 0 3px rgba(199, 51, 74, 0.1);

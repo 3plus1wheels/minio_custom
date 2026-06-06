@@ -1,14 +1,27 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
 
+function getCookie(name) {
+  return document.cookie
+    .split("; ")
+    .find((row) => row.startsWith(`${name}=`))
+    ?.split("=")
+    .slice(1)
+    .join("=") || "";
+}
+
 export async function apiRequest(path, { token, ...options } = {}) {
   const headers = new Headers(options.headers);
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   if (options.body && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
+  }
+  if (!["GET", "HEAD", "OPTIONS"].includes(String(options.method || "GET").toUpperCase())) {
+    const csrfToken = getCookie("csrftoken");
+    if (csrfToken) headers.set("X-CSRFToken", decodeURIComponent(csrfToken));
   }
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
+    credentials: "include",
     headers,
   });
 
@@ -30,8 +43,12 @@ export function login(username, password) {
   });
 }
 
-export function getMe(token) {
-  return apiRequest("/me/", { token });
+export function logout() {
+  return apiRequest("/auth/logout/", { method: "POST" });
+}
+
+export function getMe() {
+  return apiRequest("/me/");
 }
 
 export function listUsers(token) {
@@ -80,11 +97,38 @@ export function deleteVisibilityGrant(token, id) {
   });
 }
 
-export function createBucket(token, name) {
+export function listGroups(token) {
+  return apiRequest("/groups/", { token });
+}
+
+export function createGroup(token, group) {
+  return apiRequest("/groups/", {
+    token,
+    method: "POST",
+    body: JSON.stringify(group),
+  });
+}
+
+export function updateGroup(token, id, group) {
+  return apiRequest(`/groups/${encodeURIComponent(id)}/`, {
+    token,
+    method: "PATCH",
+    body: JSON.stringify(group),
+  });
+}
+
+export function deleteGroup(token, id) {
+  return apiRequest(`/groups/${encodeURIComponent(id)}/`, {
+    token,
+    method: "DELETE",
+  });
+}
+
+export function createBucket(token, name, options = {}) {
   return apiRequest("/buckets/", {
     token,
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, ...options }),
   });
 }
 
@@ -92,8 +136,11 @@ export function listBuckets(token) {
   return apiRequest("/buckets/", { token });
 }
 
-export function listObjects(token, bucket) {
-  return apiRequest(`/buckets/${encodeURIComponent(bucket)}/objects/`, { token });
+export function listObjects(token, bucket, { prefix = "", continuationToken = "", maxKeys = 100 } = {}) {
+  const params = new URLSearchParams({ max_keys: String(maxKeys) });
+  if (prefix) params.set("prefix", prefix);
+  if (continuationToken) params.set("continuation_token", continuationToken);
+  return apiRequest(`/buckets/${encodeURIComponent(bucket)}/objects/?${params.toString()}`, { token });
 }
 
 export function rewindBucket(token, bucket, rewindTo) {
@@ -120,9 +167,7 @@ export async function downloadObject(token, bucket, key, versionId = "") {
   const response = await fetch(
     `${API_BASE_URL}/buckets/${encodeURIComponent(bucket)}/objects/download/?key=${encodeURIComponent(key)}${versionParam}`,
     {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      credentials: "include",
     }
   );
 

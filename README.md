@@ -47,13 +47,23 @@ Open:
 - MinIO console: http://localhost:9001
 - PostgreSQL: localhost:5432
 
+Compose binds MinIO and PostgreSQL host ports to `127.0.0.1` by default. For production, keep those ports private and expose user traffic through a TLS reverse proxy or firewall-controlled network path.
+
 Create the first root app user after the stack is running:
 
 ```bash
 docker compose -f compose.yml exec backend python manage.py createsuperuser
 ```
 
-Log in to the frontend with that account. Open the `Admin` tab to create normal users and assign visibility grants.
+This command is the preferred first-launch setup path. It writes the superuser to PostgreSQL through Django; do not create the first app user manually with SQL.
+
+For non-interactive setup, use a one-off shell command and replace the placeholder values before running:
+
+```bash
+docker compose -f compose.yml exec backend python manage.py shell -c "from django.contrib.auth import get_user_model; from storage_api.models import UserProfile; User=get_user_model(); u,_=User.objects.get_or_create(username='CHANGE_ME_USERNAME'); u.is_superuser=True; u.is_staff=True; u.is_active=True; u.set_password('CHANGE_ME_STRONG_PASSWORD'); u.save(); UserProfile.objects.update_or_create(user=u, defaults={'role': UserProfile.ROLE_ADMIN}); print('superuser ready')"
+```
+
+Log in to the frontend with the superuser account. Open the `Admin` tab to create normal users, groups, and visibility grants.
 
 App roles:
 
@@ -65,9 +75,11 @@ App roles:
 Visibility grants:
 
 - Target can be a role or a specific user.
+- Target can also be an admin-created group of editor/viewer users.
 - Blank prefix means the whole bucket.
 - `write` implies `read`.
 - Editor/viewer accounts see no buckets until an admin or superuser grants access.
+- New buckets default to open access for all viewers/editors. Pick a group in the Create Bucket dialog to restrict the new bucket to that group instead.
 
 MinIO login:
 
@@ -97,6 +109,15 @@ pgAdmin 4 setup:
 6. Expand `Servers > minio_custom > Databases > minio_custom > Schemas > public > Tables`.
 
 If local PostgreSQL already uses port `5432`, set `POSTGRES_HOST_PORT=5433` in `.env` and use port `5433` in pgAdmin. Red X icons on other pgAdmin databases usually mean stale or disconnected entries; they are unrelated to this Docker database.
+
+Frontend authentication uses httpOnly JWT cookies. In production, serve the frontend/API over HTTPS and set:
+
+```env
+JWT_COOKIE_SECURE=true
+DJANGO_CORS_ALLOWED_ORIGINS=https://app.example.com
+DJANGO_CSRF_TRUSTED_ORIGINS=https://app.example.com
+VITE_API_BASE_URL=https://api.example.com/api
+```
 
 Share links use `MINIO_PUBLIC_ENDPOINT` from `.env`. For local development this can be `http://localhost:9000`. For deployment, set it to the public MinIO API origin users can reach, for example:
 

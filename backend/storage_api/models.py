@@ -20,12 +20,27 @@ class UserProfile(models.Model):
         return f"{self.user} ({self.role})"
 
 
+class AccessGroup(models.Model):
+    name = models.CharField(max_length=80, unique=True)
+    users = models.ManyToManyField(settings.AUTH_USER_MODEL, blank=True, related_name="access_groups")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 class VisibilityGrant(models.Model):
     TARGET_ROLE = "role"
     TARGET_USER = "user"
+    TARGET_GROUP = "group"
     TARGET_CHOICES = (
         (TARGET_ROLE, "Role"),
         (TARGET_USER, "User"),
+        (TARGET_GROUP, "Group"),
     )
 
     ACCESS_READ = "read"
@@ -44,6 +59,13 @@ class VisibilityGrant(models.Model):
         null=True,
         related_name="visibility_grants",
     )
+    group = models.ForeignKey(
+        AccessGroup,
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name="visibility_grants",
+    )
     bucket = models.CharField(max_length=63)
     prefix = models.CharField(max_length=1024, blank=True, default="")
     access = models.CharField(max_length=8, choices=ACCESS_CHOICES)
@@ -51,12 +73,13 @@ class VisibilityGrant(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["bucket", "prefix", "target_type", "role", "user_id"]
+        ordering = ["bucket", "prefix", "target_type", "role", "user_id", "group_id"]
         constraints = [
             models.CheckConstraint(
                 check=(
-                    Q(target_type="role", role__in=["admin", "editor", "viewer"], user__isnull=True)
-                    | Q(target_type="user", role="", user__isnull=False)
+                    Q(target_type="role", role__in=["admin", "editor", "viewer"], user__isnull=True, group__isnull=True)
+                    | Q(target_type="user", role="", user__isnull=False, group__isnull=True)
+                    | Q(target_type="group", role="", user__isnull=True, group__isnull=False)
                 ),
                 name="visibility_grant_valid_target",
             ),
@@ -70,8 +93,18 @@ class VisibilityGrant(models.Model):
                 condition=Q(target_type="user"),
                 name="unique_user_visibility_grant",
             ),
+            models.UniqueConstraint(
+                fields=["target_type", "group", "bucket", "prefix", "access"],
+                condition=Q(target_type="group"),
+                name="unique_group_visibility_grant",
+            ),
         ]
 
     def __str__(self):
-        target = self.role if self.target_type == self.TARGET_ROLE else self.user_id
+        if self.target_type == self.TARGET_ROLE:
+            target = self.role
+        elif self.target_type == self.TARGET_GROUP:
+            target = self.group_id
+        else:
+            target = self.user_id
         return f"{self.target_type}:{target} {self.access} {self.bucket}/{self.prefix}"
