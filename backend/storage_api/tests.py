@@ -3,7 +3,9 @@ from io import BytesIO
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework.test import APIClient
 
@@ -92,6 +94,27 @@ class AuthAndAdminTests(TestCase):
         self.assertEqual(allowed_response.status_code, 201)
         s3.create_bucket.assert_called_once_with(Bucket="csrf-bucket")
 
+    def test_auth_endpoints_ignore_stale_invalid_access_cookie(self):
+        client = APIClient()
+        client.cookies["access_token"] = "stale.invalid.token"
+
+        token_response = client.post(
+            reverse("token_obtain_pair"),
+            {"username": "root", "password": "password123"},
+            format="json",
+        )
+        self.assertEqual(token_response.status_code, 200)
+        self.assertIn("access_token", token_response.cookies)
+
+        refresh_response = client.post(reverse("token_refresh"), {}, format="json")
+        self.assertEqual(refresh_response.status_code, 200)
+        self.assertIn("access_token", refresh_response.cookies)
+
+        client.cookies["access_token"] = "stale.invalid.token"
+        logout_response = client.post(reverse("token_logout"))
+        self.assertEqual(logout_response.status_code, 204)
+        self.assertEqual(logout_response.cookies["access_token"].value, "")
+
     def test_superuser_can_create_admin_editor_viewer_and_grants(self):
         self.client.force_authenticate(self.superuser)
 
@@ -149,6 +172,80 @@ class AuthAndAdminTests(TestCase):
             format="json",
         )
         self.assertEqual(create_editor.status_code, 201)
+
+    def test_admin_lists_are_paginated_and_filterable(self):
+        self.client.force_authenticate(self.superuser)
+        viewer = set_role(
+            get_user_model().objects.create_user(username="alpha-viewer", password="password123"),
+            UserProfile.ROLE_VIEWER,
+        )
+        editor = set_role(
+            get_user_model().objects.create_user(username="beta-editor", password="password123"),
+            UserProfile.ROLE_EDITOR,
+        )
+        group = AccessGroup.objects.create(name="ops-alpha")
+        group.users.add(viewer, editor)
+        VisibilityGrant.objects.create(
+            target_type=VisibilityGrant.TARGET_GROUP,
+            group=group,
+            bucket="docs",
+            prefix="public/",
+            access=VisibilityGrant.ACCESS_WRITE,
+        )
+
+        users_response = self.client.get(
+            reverse("user-list-create"),
+            {"q": "alpha", "role": UserProfile.ROLE_VIEWER, "page_size": "1"},
+        )
+        self.assertEqual(users_response.status_code, 200)
+        self.assertEqual(users_response.data["page_size"], 1)
+        self.assertEqual(users_response.data["count"], 1)
+        self.assertEqual(users_response.data["results"][0]["username"], "alpha-viewer")
+
+        groups_response = self.client.get(reverse("group-list-create"), {"q": "alpha"})
+        self.assertEqual(groups_response.status_code, 200)
+        self.assertEqual(groups_response.data["count"], 1)
+        self.assertEqual(groups_response.data["results"][0]["member_count"], 2)
+        self.assertEqual(groups_response.data["results"][0]["member_preview"][0]["username"], "alpha-viewer")
+
+        grants_response = self.client.get(
+            reverse("visibility-grant-list-create"),
+            {"target_type": "group", "bucket": "docs", "access": "write"},
+        )
+        self.assertEqual(grants_response.status_code, 200)
+        self.assertEqual(grants_response.data["count"], 1)
+        self.assertEqual(grants_response.data["results"][0]["group_name"], "ops-alpha")
+
+    def test_group_list_uses_bounded_queries(self):
+        self.client.force_authenticate(self.superuser)
+        users = [
+            set_role(
+                get_user_model().objects.create_user(username=f"member-{index}", password="password123"),
+                UserProfile.ROLE_VIEWER,
+            )
+            for index in range(5)
+        ]
+        for index in range(5):
+            group = AccessGroup.objects.create(name=f"ops-{index}")
+            group.users.add(*users)
+
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get(reverse("group-list-create"), {"page_size": "5"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 5)
+        self.assertEqual(len(response.data["results"]), 5)
+        self.assertLessEqual(len(captured), 4)
+
+    def test_admin_query_indexes_exist(self):
+        with connection.cursor() as cursor:
+            profile_indexes = connection.introspection.get_constraints(cursor, UserProfile._meta.db_table)
+            grant_indexes = connection.introspection.get_constraints(cursor, VisibilityGrant._meta.db_table)
+
+        self.assertIn("userprofile_role_idx", profile_indexes)
+        self.assertIn("grant_admin_order_idx", grant_indexes)
+        self.assertIn("grant_bucket_access_idx", grant_indexes)
+        self.assertIn("grant_target_access_idx", grant_indexes)
 
 
 class StorageApiTests(TestCase):
@@ -377,6 +474,38 @@ class StorageApiTests(TestCase):
             Prefix="public/",
             ContinuationToken="page-1",
         )
+
+    @patch("storage_api.views.get_s3_client")
+    def test_object_keys_reject_control_characters(self, get_s3_client):
+        self.client.force_authenticate(self.admin)
+        s3 = self.mock_s3(get_s3_client)
+
+        upload_response = self.client.post(
+            reverse("object-list-create-delete", kwargs={"bucket": "docs"}),
+            {"file": BytesIO(b"hello"), "key": "bad\r\nname.txt"},
+            format="multipart",
+        )
+        self.assertEqual(upload_response.status_code, 400)
+        s3.upload_fileobj.assert_not_called()
+
+        download_response = self.client.get(
+            reverse("object-download", kwargs={"bucket": "docs"}),
+            {"key": "bad\r\nname.txt"},
+        )
+        self.assertEqual(download_response.status_code, 400)
+
+    @patch("storage_api.views.get_s3_client")
+    def test_preview_content_disposition_escapes_filename(self, get_s3_client):
+        self.client.force_authenticate(self.admin)
+        s3 = self.mock_s3(get_s3_client)
+
+        response = self.client.get(
+            reverse("object-share", kwargs={"bucket": "docs"}),
+            {"key": 'public/bad"name.txt', "preview": "true"},
+        )
+        self.assertEqual(response.status_code, 200)
+        params = s3.generate_presigned_url.call_args.kwargs["Params"]
+        self.assertEqual(params["ResponseContentDisposition"], "inline; filename=\"bad\\\"name.txt\"")
 
     @patch("storage_api.views.get_s3_client")
     def test_editor_write_prefix_and_user_specific_grants(self, get_s3_client):

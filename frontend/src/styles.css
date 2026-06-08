@@ -608,6 +608,50 @@ button:focus-visible {
   gap: 18px;
 }
 
+.admin-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #d8dde3;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.admin-tabs button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #cbd4dd;
+  border-radius: 4px;
+  color: #1d3448;
+  background: #ffffff;
+}
+
+.admin-tabs button.active {
+  border-color: #b5253b;
+  color: #ffffff;
+  background: #c72d46;
+}
+
+.admin-tabs span,
+.admin-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 4px;
+  background: #eef2f5;
+  color: #1d3448;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.admin-tabs button.active span {
+  color: #7c1828;
+  background: #ffffff;
+}
+
 .admin-section {
   padding: 18px;
 }
@@ -622,6 +666,46 @@ button:focus-visible {
   grid-template-columns: repeat(4, minmax(120px, 1fr));
   gap: 10px;
   margin-bottom: 18px;
+}
+
+.admin-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(120px, 180px)) auto;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.admin-toolbar.grant-toolbar {
+  grid-template-columns: minmax(220px, 1fr) minmax(120px, 160px) minmax(150px, 200px) minmax(120px, 160px) auto;
+}
+
+.admin-toolbar input,
+.admin-toolbar select {
+  min-width: 0;
+  height: 40px;
+  border: 1px solid #cbd4dd;
+  border-radius: 4px;
+  padding: 0 10px;
+  color: #172026;
+  background: #ffffff;
+}
+
+.admin-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 12px;
+  color: #52616b;
+}
+
+.admin-pager select,
+.admin-pager button {
+  min-height: 36px;
+  border: 1px solid #cbd4dd;
+  border-radius: 4px;
+  color: #1d3448;
+  background: #ffffff;
 }
 
 .admin-form.grant-form {
@@ -710,7 +794,7 @@ button:focus-visible {
 }
 
 .grants-table .admin-row {
-  grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.5fr) 100px 120px;
+  grid-template-columns: minmax(220px, 1.1fr) minmax(260px, 1.4fr) 110px 110px;
 }
 
 .groups-table .admin-row {
@@ -741,6 +825,121 @@ button:focus-visible {
 
 .admin-row-actions input {
   flex: 1;
+}
+
+.grant-target,
+.grant-scope {
+  min-width: 0;
+}
+
+.grant-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.grant-target-type,
+.access-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid #d8e0e7;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.grant-target-type {
+  flex: 0 0 auto;
+  color: #52616b;
+  background: #f6f8fa;
+  border-color: #d8e0e7;
+}
+
+.grant-target strong,
+.grant-scope strong,
+.grant-scope span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grant-target strong {
+  color: #172026;
+  font-weight: 800;
+}
+
+.grant-scope {
+  display: grid;
+  gap: 2px;
+}
+
+.grant-scope strong {
+  color: #172026;
+  font-weight: 800;
+}
+
+.grant-scope span {
+  color: #66727d;
+  font-size: 13px;
+}
+
+.access-badge {
+  color: #52616b;
+  background: #f6f8fa;
+  border-color: #d8e0e7;
+}
+
+.access-badge.write {
+  color: #9f1d31;
+  background: #fff7f8;
+  border-color: #efc1c9;
+}
+
+.admin-row-actions .danger-quiet {
+  color: #9f1d31;
+  border-color: #efc1c9;
+  background: #ffffff;
+}
+
+.admin-row-actions .danger-quiet:hover {
+  color: #ffffff;
+  border-color: #b5253b;
+  background: #c72d46;
+}
+
+.admin-password-cell {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  border: 1px solid #cbd4dd;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.admin-password-cell input {
+  flex: 1;
+  height: 38px;
+  border: 0;
+}
+
+.admin-password-cell button {
+  width: 36px;
+  min-height: 36px;
+  border: 0;
+  color: #52616b;
+  background: transparent;
+}
+
+.admin-password-cell input:placeholder-shown + button {
+  visibility: hidden;
 }
 
 .admin-empty {

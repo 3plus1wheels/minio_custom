@@ -1,7 +1,23 @@
+import re
+
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from storage_api.models import AccessGroup, UserProfile, VisibilityGrant
+
+
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def validate_object_key_value(value):
+    key = str(value or "")
+    if not key:
+        raise serializers.ValidationError("Object key is required.")
+    if len(key) > 1024:
+        raise serializers.ValidationError("Object key must be 1024 characters or fewer.")
+    if CONTROL_CHAR_RE.search(key):
+        raise serializers.ValidationError("Object key cannot contain control characters.")
+    return key
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -140,6 +156,23 @@ class AccessGroupSerializer(serializers.ModelSerializer):
         return instance
 
 
+class AccessGroupListSerializer(serializers.ModelSerializer):
+    member_count = serializers.IntegerField(read_only=True)
+    member_preview = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AccessGroup
+        fields = ("id", "name", "member_count", "member_preview", "created_at", "updated_at")
+
+    def get_member_preview(self, instance):
+        users = getattr(instance, "prefetched_users", None)
+        if users is None:
+            users = list(instance.users.order_by("username")[:3])
+        else:
+            users = users[:3]
+        return [{"id": user.id, "username": user.username} for user in users]
+
+
 class BucketSerializer(serializers.Serializer):
     name = serializers.RegexField(
         regex=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$",
@@ -160,3 +193,8 @@ class BucketSerializer(serializers.Serializer):
 class ObjectUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
     key = serializers.CharField(required=False, allow_blank=True, max_length=1024)
+
+    def validate(self, attrs):
+        uploaded_file = attrs.get("file")
+        attrs["key"] = validate_object_key_value(attrs.get("key") or getattr(uploaded_file, "name", ""))
+        return attrs

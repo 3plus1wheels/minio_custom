@@ -2,14 +2,12 @@ import {
   ArrowLeft,
   BookOpenText,
   CheckCircle,
-  CircleHelp,
   ClipboardCheck,
   Copy,
   Download,
   FileText,
   Folder,
   LogOut,
-  Moon,
   Share2,
   Shield,
   Plus,
@@ -42,6 +40,7 @@ import {
   deleteVisibilityGrant,
   deleteObject,
   downloadObject,
+  getGroup,
   getMe,
   getObjectTags,
   listBuckets,
@@ -315,6 +314,11 @@ function AdminPanel({
   users,
   groups,
   grants,
+  assignableUsers,
+  grantGroups,
+  meta,
+  filters,
+  setFilters,
   buckets,
   newUser,
   setNewUser,
@@ -326,15 +330,66 @@ function AdminPanel({
   onDeactivateUser,
   onCreateGroup,
   onUpdateGroup,
+  onEditGroup,
+  onCancelEditGroup,
   onDeleteGroup,
   onCreateGrant,
   onDeleteGrant,
   onRefresh,
+  editingGroup,
 }) {
-  const grantTargetUsers = users.filter((user) => user.role === "editor" || user.role === "viewer");
+  const [activeAdminTab, setActiveAdminTab] = useState("users");
+  const [visibleAdminPasswords, setVisibleAdminPasswords] = useState({});
+  const grantTargetUsers = assignableUsers.filter((user) => user.role === "editor" || user.role === "viewer");
   const canManageAdmins = Boolean(currentUser?.permissions?.can_manage_admins);
   const selectedGrantBuckets = Array.isArray(newGrant.buckets) ? newGrant.buckets : [];
   const areAllGrantBucketsSelected = buckets.length > 0 && buckets.every((bucket) => selectedGrantBuckets.includes(bucket.name));
+  const adminTabs = [
+    { id: "users", label: "Users", count: meta.users.count },
+    { id: "groups", label: "Groups", count: meta.groups.count },
+    { id: "grants", label: "Grants", count: meta.grants.count },
+  ];
+
+  function applyAdminFilter(section, patch) {
+    const nextFilters = {
+      ...filters,
+      [section]: {
+        ...filters[section],
+        ...patch,
+        page: patch.page || 1,
+      },
+    };
+    setFilters(nextFilters);
+    onRefresh(nextFilters);
+  }
+
+  function changeAdminPage(section, page) {
+    applyAdminFilter(section, { page });
+  }
+
+  function renderAdminPager(section) {
+    const pageMeta = meta[section];
+    return (
+      <div className="admin-pager">
+        <span>{pageMeta.count.toLocaleString()} records</span>
+        <select
+          value={filters[section].page_size}
+          onChange={(event) => applyAdminFilter(section, { page_size: Number(event.target.value) })}
+        >
+          <option value={25}>25</option>
+          <option value={50}>50</option>
+          <option value={100}>100</option>
+        </select>
+        <button type="button" disabled={pageMeta.page <= 1 || isLoading} onClick={() => changeAdminPage(section, pageMeta.page - 1)}>
+          Previous
+        </button>
+        <span>Page {pageMeta.page} / {pageMeta.total_pages}</span>
+        <button type="button" disabled={pageMeta.page >= pageMeta.total_pages || isLoading} onClick={() => changeAdminPage(section, pageMeta.page + 1)}>
+          Next
+        </button>
+      </div>
+    );
+  }
 
   function toggleGrantBucket(bucketName) {
     setNewGrant((grant) => {
@@ -360,16 +415,49 @@ function AdminPanel({
       <header className="admin-header">
         <div>
           <h2><Shield size={26} /> Admin</h2>
-          <p>Manage users and bucket/prefix visibility.</p>
+          <p>Search, filter, and manage records in paged tables.</p>
         </div>
-        <button type="button" title="Refresh admin data" onClick={onRefresh}>
+        <button type="button" title="Refresh admin data" onClick={() => onRefresh()}>
           Refresh <RefreshCw size={18} />
         </button>
       </header>
 
+      <div className="admin-tabs" role="tablist" aria-label="Admin sections">
+        {adminTabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            className={activeAdminTab === tab.id ? "active" : ""}
+            onClick={() => setActiveAdminTab(tab.id)}
+          >
+            {tab.label} <span>{tab.count.toLocaleString()}</span>
+          </button>
+        ))}
+      </div>
+
       <div className="admin-grid">
-        <section className="admin-section">
+        {activeAdminTab === "users" ? <section className="admin-section">
           <h3>Users</h3>
+          <div className="admin-toolbar">
+            <input
+              placeholder="Search users"
+              value={filters.users.q}
+              onChange={(event) => setFilters((items) => ({ ...items, users: { ...items.users, q: event.target.value } }))}
+            />
+            <select value={filters.users.role} onChange={(event) => applyAdminFilter("users", { role: event.target.value })}>
+              <option value="">All roles</option>
+              <option value="viewer">Viewer</option>
+              <option value="editor">Editor</option>
+              <option value="admin">Admin</option>
+              {canManageAdmins ? <option value="superuser">Superuser</option> : null}
+            </select>
+            <select value={filters.users.is_active} onChange={(event) => applyAdminFilter("users", { is_active: event.target.value })}>
+              <option value="">Any status</option>
+              <option value="true">Active</option>
+              <option value="false">Inactive</option>
+            </select>
+            <button type="button" onClick={() => applyAdminFilter("users", { q: filters.users.q })}>Search</button>
+          </div>
           <form className="admin-form" onSubmit={onCreateUser}>
             <input
               required
@@ -418,7 +506,27 @@ function AdminPanel({
                   Active
                 </label>
                 <div className="admin-row-actions">
-                  <input name="password" minLength={8} type="password" placeholder="New password" />
+                  <label className="admin-password-cell">
+                    <input
+                      name="password"
+                      minLength={8}
+                      type={visibleAdminPasswords[user.id] ? "text" : "password"}
+                      placeholder="New password"
+                      onChange={(event) => {
+                        if (!event.target.value) {
+                          setVisibleAdminPasswords((items) => ({ ...items, [user.id]: false }));
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      aria-label={visibleAdminPasswords[user.id] ? "Hide password" : "Show password"}
+                      title={visibleAdminPasswords[user.id] ? "Hide password" : "Show password"}
+                      onClick={() => setVisibleAdminPasswords((items) => ({ ...items, [user.id]: !items[user.id] }))}
+                    >
+                      {visibleAdminPasswords[user.id] ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </label>
                   <button type="submit" title={`Save ${user.username}`}>Save</button>
                   <button
                     type="button"
@@ -432,16 +540,25 @@ function AdminPanel({
               </form>
             ))}
           </div>
-        </section>
+          {renderAdminPager("users")}
+        </section> : null}
 
-        <section className="admin-section">
+        {activeAdminTab === "groups" ? <section className="admin-section">
           <h3>Groups</h3>
+          <div className="admin-toolbar">
+            <input
+              placeholder="Search groups or members"
+              value={filters.groups.q}
+              onChange={(event) => setFilters((items) => ({ ...items, groups: { ...items.groups, q: event.target.value } }))}
+            />
+            <button type="button" onClick={() => applyAdminFilter("groups", { q: filters.groups.q })}>Search</button>
+          </div>
           <form className="admin-form group-create-form" onSubmit={onCreateGroup}>
             <input required name="name" placeholder="Group name" />
             <fieldset className="bucket-multi-field user-multi-field">
               <legend>Members</legend>
               <div className="bucket-multi-list">
-                {users
+                {assignableUsers
                   .filter((user) => user.role === "editor" || user.role === "viewer")
                   .map((user) => (
                     <label key={user.id}>
@@ -461,39 +578,77 @@ function AdminPanel({
               <span>Actions</span>
             </div>
             {groups.length ? groups.map((group) => (
-              <form className="admin-row" key={group.id} onSubmit={(event) => onUpdateGroup(event, group.id)}>
-                <input name="name" defaultValue={group.name} aria-label={`${group.name} group name`} />
-                <fieldset className="bucket-multi-field user-multi-field">
-                  <legend>Members</legend>
-                  <div className="bucket-multi-list">
-                    {users
-                      .filter((user) => user.role === "editor" || user.role === "viewer")
-                      .map((user) => (
+              editingGroup?.id === group.id ? (
+                <form className="admin-row" key={group.id} onSubmit={(event) => onUpdateGroup(event, group.id)}>
+                  <input name="name" defaultValue={editingGroup.name} aria-label={`${group.name} group name`} />
+                  <fieldset className="bucket-multi-field user-multi-field">
+                    <legend>Members</legend>
+                    <div className="bucket-multi-list">
+                      {assignableUsers.map((user) => (
                         <label key={user.id}>
                           <input
                             name="users"
                             type="checkbox"
                             value={user.id}
-                            defaultChecked={(group.user_details || []).some((member) => member.id === user.id)}
+                            defaultChecked={(editingGroup.user_details || []).some((member) => member.id === user.id)}
                           />
                           {user.username}
                         </label>
                       ))}
+                    </div>
+                  </fieldset>
+                  <div className="admin-row-actions">
+                    <button type="submit" title={`Save ${group.name}`}>Save</button>
+                    <button type="button" title="Cancel edit" onClick={onCancelEditGroup}>Cancel</button>
                   </div>
-                </fieldset>
-                <div className="admin-row-actions">
-                  <button type="submit" title={`Save ${group.name}`}>Save</button>
-                  <button type="button" title={`Delete ${group.name}`} onClick={() => onDeleteGroup(group)}>
-                    Delete
-                  </button>
+                </form>
+              ) : (
+                <div className="admin-row" key={group.id}>
+                  <span>{group.name}</span>
+                  <span>
+                    {(group.member_count ?? (group.user_details || []).length).toLocaleString()} member{(group.member_count ?? (group.user_details || []).length) === 1 ? "" : "s"}
+                    {(group.member_preview || []).length ? ` - ${group.member_preview.map((user) => user.username).join(", ")}` : ""}
+                  </span>
+                  <div className="admin-row-actions">
+                    <button type="button" title={`Edit ${group.name}`} onClick={() => onEditGroup(group)}>
+                      Edit
+                    </button>
+                    <button type="button" title={`Delete ${group.name}`} onClick={() => onDeleteGroup(group)}>
+                      Delete
+                    </button>
+                  </div>
                 </div>
-              </form>
+              )
             )) : <p className="admin-empty">No groups yet.</p>}
           </div>
-        </section>
+          {renderAdminPager("groups")}
+        </section> : null}
 
-        <section className="admin-section">
+        {activeAdminTab === "grants" ? <section className="admin-section">
           <h3>Visibility Grants</h3>
+          <div className="admin-toolbar grant-toolbar">
+            <input
+              placeholder="Search target, bucket, prefix"
+              value={filters.grants.q}
+              onChange={(event) => setFilters((items) => ({ ...items, grants: { ...items.grants, q: event.target.value } }))}
+            />
+            <select value={filters.grants.target_type} onChange={(event) => applyAdminFilter("grants", { target_type: event.target.value })}>
+              <option value="">Any target</option>
+              <option value="role">Role</option>
+              <option value="user">User</option>
+              <option value="group">Group</option>
+            </select>
+            <select value={filters.grants.bucket} onChange={(event) => applyAdminFilter("grants", { bucket: event.target.value })}>
+              <option value="">Any bucket</option>
+              {buckets.map((bucket) => <option key={bucket.name} value={bucket.name}>{bucket.name}</option>)}
+            </select>
+            <select value={filters.grants.access} onChange={(event) => applyAdminFilter("grants", { access: event.target.value })}>
+              <option value="">Any access</option>
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+            </select>
+            <button type="button" onClick={() => applyAdminFilter("grants", { q: filters.grants.q })}>Search</button>
+          </div>
           <form className="admin-form grant-form" onSubmit={onCreateGrant}>
             <select
               value={newGrant.target_type}
@@ -529,7 +684,7 @@ function AdminPanel({
                 onChange={(event) => setNewGrant((grant) => ({ ...grant, group: event.target.value }))}
               >
                 <option value="">Choose group</option>
-                {groups.map((group) => (
+                {grantGroups.map((group) => (
                   <option key={group.id} value={group.id}>{group.name}</option>
                 ))}
               </select>
@@ -581,24 +736,43 @@ function AdminPanel({
             </div>
             {grants.length ? grants.map((grant) => (
               <div className="admin-row" key={grant.id}>
-                <span>
-                  {grant.target_type === "role"
-                    ? `Role: ${grant.role}`
-                    : grant.target_type === "group"
-                      ? `Group: ${grant.group_name || grant.group}`
-                      : `User: ${grant.username || grant.user}`}
+                <span className="grant-target">
+                  <span className={`grant-target-type ${grant.target_type}`}>
+                    {grant.target_type}
+                  </span>
+                  <strong title={
+                    grant.target_type === "role"
+                      ? grant.role
+                      : grant.target_type === "group"
+                        ? grant.group_name || grant.group
+                        : grant.username || grant.user
+                  }>
+                    {grant.target_type === "role"
+                      ? grant.role
+                      : grant.target_type === "group"
+                        ? grant.group_name || grant.group
+                        : grant.username || grant.user}
+                  </strong>
                 </span>
-                <span>{grant.bucket}/{grant.prefix || "*"}</span>
-                <span>{grant.access}</span>
+                <span className="grant-scope">
+                  <strong title={grant.bucket || "All buckets"}>{grant.bucket || "All buckets"}</strong>
+                  <span title={grant.prefix || "Whole bucket"}>
+                    {grant.prefix ? `/${grant.prefix}` : "Whole bucket"}
+                  </span>
+                </span>
+                <span className={`access-badge ${grant.access}`}>
+                  {grant.access}
+                </span>
                 <div className="admin-row-actions">
-                  <button type="button" title="Delete grant" onClick={() => onDeleteGrant(grant)}>
+                  <button className="danger-quiet" type="button" title="Delete grant" onClick={() => onDeleteGrant(grant)}>
                     Delete
                   </button>
                 </div>
               </div>
             )) : <p className="admin-empty">No visibility grants yet.</p>}
           </div>
-        </section>
+          {renderAdminPager("grants")}
+        </section> : null}
       </div>
     </section>
   );
@@ -839,8 +1013,21 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
   const [currentUser, setCurrentUser] = useState(null);
   const [activeView, setActiveView] = useState("browser");
   const [adminUsers, setAdminUsers] = useState([]);
+  const [adminAssignableUsers, setAdminAssignableUsers] = useState([]);
   const [accessGroups, setAccessGroups] = useState([]);
+  const [grantGroups, setGrantGroups] = useState([]);
   const [visibilityGrants, setVisibilityGrants] = useState([]);
+  const [editingGroup, setEditingGroup] = useState(null);
+  const [adminMeta, setAdminMeta] = useState({
+    users: { count: 0, page: 1, page_size: 25, total_pages: 1 },
+    groups: { count: 0, page: 1, page_size: 25, total_pages: 1 },
+    grants: { count: 0, page: 1, page_size: 25, total_pages: 1 },
+  });
+  const [adminFilters, setAdminFilters] = useState({
+    users: { q: "", role: "", is_active: "", page: 1, page_size: 25 },
+    groups: { q: "", page: 1, page_size: 25 },
+    grants: { q: "", target_type: "", bucket: "", access: "", page: 1, page_size: 25 },
+  });
   const [newUser, setNewUser] = useState({ username: "", password: "", role: "viewer" });
   const [newGrant, setNewGrant] = useState({
     target_type: "role",
@@ -949,18 +1136,41 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     }
   }
 
-  async function refreshAdminData() {
+  function getAdminPageMeta(data, fallbackItems = []) {
+    return {
+      count: data.count ?? fallbackItems.length,
+      page: data.page || 1,
+      page_size: data.page_size || 25,
+      total_pages: data.total_pages || 1,
+    };
+  }
+
+  async function refreshAdminData(nextFilters = adminFilters) {
     if (!canManageUsers) return;
     setAdminLoading(true);
     try {
       const [usersData, grantsData, groupsData] = await Promise.all([
-        listUsers(token),
-        listVisibilityGrants(token),
-        listGroups(token),
+        listUsers(token, nextFilters.users),
+        listVisibilityGrants(token, nextFilters.grants),
+        listGroups(token, nextFilters.groups),
       ]);
-      setAdminUsers(usersData.users || []);
-      setVisibilityGrants(grantsData.grants || []);
-      setAccessGroups(groupsData.groups || []);
+      const [selectorUsersData, selectorGroupsData] = await Promise.all([
+        listUsers(token, { page_size: 100 }),
+        listGroups(token, { page_size: 100 }),
+      ]);
+      const nextUsers = usersData.results || usersData.users || [];
+      const nextGrants = grantsData.results || grantsData.grants || [];
+      const nextGroups = groupsData.results || groupsData.groups || [];
+      setAdminUsers(nextUsers);
+      setVisibilityGrants(nextGrants);
+      setAccessGroups(nextGroups);
+      setAdminAssignableUsers(selectorUsersData.results || selectorUsersData.users || []);
+      setGrantGroups(selectorGroupsData.results || selectorGroupsData.groups || []);
+      setAdminMeta({
+        users: getAdminPageMeta(usersData, nextUsers),
+        grants: getAdminPageMeta(grantsData, nextGrants),
+        groups: getAdminPageMeta(groupsData, nextGroups),
+      });
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -977,9 +1187,9 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     setStatus("");
     try {
       const user = await createUser(token, newUser);
-      setAdminUsers((items) => [...items, user].sort((a, b) => a.username.localeCompare(b.username)));
       setNewUser({ username: "", password: "", role: "viewer" });
       setStatus(`User "${user.username}" created.`);
+      await refreshAdminData();
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -991,7 +1201,8 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
 
   async function handleUpdateUser(event, userId) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const payload = {
       username: String(form.get("username") || "").trim(),
       role: String(form.get("role") || "viewer"),
@@ -1001,9 +1212,9 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     if (passwordValue) payload.password = passwordValue;
     try {
       const user = await updateUser(token, userId, payload);
-      setAdminUsers((items) => items.map((item) => (item.id === user.id ? user : item)));
-      event.currentTarget.reset();
+      if (formElement?.elements?.password) formElement.elements.password.value = "";
       setStatus(`User "${user.username}" updated.`);
+      await refreshAdminData();
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -1017,10 +1228,8 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     if (!window.confirm(`Deactivate "${user.username}"?`)) return;
     try {
       await deactivateUser(token, user.id);
-      setAdminUsers((items) =>
-        items.map((item) => (item.id === user.id ? { ...item, is_active: false } : item))
-      );
       setStatus(`User "${user.username}" deactivated.`);
+      await refreshAdminData();
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -1032,16 +1241,17 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
 
   async function handleCreateGroup(event) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const payload = {
       name: String(form.get("name") || "").trim(),
       users: form.getAll("users").map((id) => Number(id)),
     };
     try {
       const group = await createGroup(token, payload);
-      setAccessGroups((items) => [...items, group].sort((a, b) => a.name.localeCompare(b.name)));
-      event.currentTarget.reset();
+      formElement?.reset();
       setStatus(`Group "${group.name}" created.`);
+      await refreshAdminData();
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -1060,8 +1270,22 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     };
     try {
       const group = await updateGroup(token, groupId, payload);
-      setAccessGroups((items) => items.map((item) => (item.id === group.id ? group : item)));
+      setEditingGroup(null);
       setStatus(`Group "${group.name}" updated.`);
+      await refreshAdminData();
+    } catch (error) {
+      if (error.status === 401) {
+        onAuthExpired();
+        return;
+      }
+      setStatus(error.message);
+    }
+  }
+
+  async function handleEditGroup(group) {
+    try {
+      const detail = await getGroup(token, group.id);
+      setEditingGroup(detail);
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -1075,9 +1299,9 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     if (!window.confirm(`Delete group "${group.name}"? Grants for this group will also be removed.`)) return;
     try {
       await deleteGroup(token, group.id);
-      setAccessGroups((items) => items.filter((item) => item.id !== group.id));
-      setVisibilityGrants((items) => items.filter((item) => item.group !== group.id));
+      setEditingGroup((item) => (item?.id === group.id ? null : item));
       setStatus(`Group "${group.name}" deleted.`);
+      await refreshAdminData();
     } catch (error) {
       if (error.status === 401) {
         onAuthExpired();
@@ -1105,7 +1329,6 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
         };
         createdGrants.push(await createVisibilityGrant(token, payload));
       }
-      setVisibilityGrants((items) => [...items, ...createdGrants]);
       setNewGrant({
         target_type: "role",
         role: "viewer",
@@ -1116,6 +1339,7 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
         access: "read",
       });
       setStatus(`Created ${createdGrants.length} visibility grant${createdGrants.length === 1 ? "" : "s"}.`);
+      await refreshAdminData();
       await refreshBuckets();
     } catch (error) {
       if (error.status === 401) {
@@ -1130,8 +1354,8 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
     if (!window.confirm("Delete this visibility grant?")) return;
     try {
       await deleteVisibilityGrant(token, grant.id);
-      setVisibilityGrants((items) => items.filter((item) => item.id !== grant.id));
       setStatus("Visibility grant deleted.");
+      await refreshAdminData();
       await refreshBuckets();
     } catch (error) {
       if (error.status === 401) {
@@ -1903,8 +2127,6 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
             </label>
           ) : null}
           <div className="header-actions">
-            <button aria-label="Help" title="Help"><CircleHelp size={20} /></button>
-            <button aria-label="Toggle dark mode" title="Toggle dark mode"><Moon size={20} /></button>
             <div className="transfers-wrap">
               <button
                 aria-label="Downloads and uploads"
@@ -1977,6 +2199,11 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
               users={adminUsers}
               groups={accessGroups}
               grants={visibilityGrants}
+              assignableUsers={adminAssignableUsers}
+              grantGroups={grantGroups}
+              meta={adminMeta}
+              filters={adminFilters}
+              setFilters={setAdminFilters}
               buckets={buckets}
               newUser={newUser}
               setNewUser={setNewUser}
@@ -1988,10 +2215,13 @@ function ObjectBrowser({ routeBucket, token, onAuthExpired, onSelectBucket, onSi
               onDeactivateUser={handleDeactivateUser}
               onCreateGroup={handleCreateGroup}
               onUpdateGroup={handleUpdateGroup}
+              onEditGroup={handleEditGroup}
+              onCancelEditGroup={() => setEditingGroup(null)}
               onDeleteGroup={handleDeleteGroup}
               onCreateGrant={handleCreateGrant}
               onDeleteGrant={handleDeleteGrant}
               onRefresh={refreshAdminData}
+              editingGroup={editingGroup}
             />
           ) : selected ? (
             <section className="bucket-browser">

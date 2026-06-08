@@ -51,8 +51,17 @@ export function getMe() {
   return apiRequest("/me/");
 }
 
-export function listUsers(token) {
-  return apiRequest("/users/", { token });
+function buildQuery(params = {}) {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") search.set(key, String(value));
+  });
+  const query = search.toString();
+  return query ? `?${query}` : "";
+}
+
+export function listUsers(token, params = {}) {
+  return apiRequest(`/users/${buildQuery(params)}`, { token });
 }
 
 export function createUser(token, user) {
@@ -78,8 +87,8 @@ export function deactivateUser(token, id) {
   });
 }
 
-export function listVisibilityGrants(token) {
-  return apiRequest("/visibility-grants/", { token });
+export function listVisibilityGrants(token, params = {}) {
+  return apiRequest(`/visibility-grants/${buildQuery(params)}`, { token });
 }
 
 export function createVisibilityGrant(token, grant) {
@@ -97,8 +106,12 @@ export function deleteVisibilityGrant(token, id) {
   });
 }
 
-export function listGroups(token) {
-  return apiRequest("/groups/", { token });
+export function listGroups(token, params = {}) {
+  return apiRequest(`/groups/${buildQuery(params)}`, { token });
+}
+
+export function getGroup(token, id) {
+  return apiRequest(`/groups/${encodeURIComponent(id)}/`, { token });
 }
 
 export function createGroup(token, group) {

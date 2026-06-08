@@ -16,6 +16,11 @@ class UserProfile(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
     role = models.CharField(max_length=16, choices=ROLE_CHOICES, default=ROLE_VIEWER)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["role"], name="userprofile_role_idx"),
+        ]
+
     def __str__(self):
         return f"{self.user} ({self.role})"
 
@@ -74,6 +79,14 @@ class VisibilityGrant(models.Model):
 
     class Meta:
         ordering = ["bucket", "prefix", "target_type", "role", "user_id", "group_id"]
+        indexes = [
+            models.Index(
+                fields=["bucket", "prefix", "target_type", "role", "user", "group"],
+                name="grant_admin_order_idx",
+            ),
+            models.Index(fields=["bucket", "access", "prefix"], name="grant_bucket_access_idx"),
+            models.Index(fields=["target_type", "access", "bucket"], name="grant_target_access_idx"),
+        ]
         constraints = [
             models.CheckConstraint(
                 check=(

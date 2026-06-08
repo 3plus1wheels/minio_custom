@@ -1,11 +1,13 @@
 import mimetypes
+from math import ceil
 
 from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.middleware.csrf import get_token
 from django.http import FileResponse
-from django.db.models import Q
+from django.db.models import Count, Prefetch, Q
+from django.utils.http import content_disposition_header
 from django.utils.dateparse import parse_datetime
 from django.utils.timezone import is_naive, make_aware
 from rest_framework import generics, permissions, status
@@ -19,11 +21,13 @@ from storage_api.models import AccessGroup, UserProfile, VisibilityGrant
 from storage_api.minio_client import get_s3_client
 from storage_api.serializers import (
     AccessGroupSerializer,
+    AccessGroupListSerializer,
     BucketSerializer,
     ObjectUploadSerializer,
     RegisterSerializer,
     UserAdminSerializer,
     VisibilityGrantSerializer,
+    validate_object_key_value,
 )
 
 
@@ -44,6 +48,16 @@ def get_optional_version_id(request):
     return version_id if version_id not in ("", None) else None
 
 
+def validate_bucket_param(bucket):
+    serializer = BucketSerializer(data={"name": bucket})
+    serializer.is_valid(raise_exception=True)
+    return serializer.validated_data["name"]
+
+
+def get_required_key_param(request):
+    return validate_object_key_value(request.query_params.get("key"))
+
+
 def get_bounded_max_keys(request, default=100, minimum=1, maximum=1000):
     raw_max_keys = request.query_params.get("max_keys", default)
     try:
@@ -55,6 +69,33 @@ def get_bounded_max_keys(request, default=100, minimum=1, maximum=1000):
 
 def forbidden(message="You do not have permission to perform this action."):
     return Response({"detail": message}, status=status.HTTP_403_FORBIDDEN)
+
+
+def paginated_response(queryset, request, serializer_class):
+    try:
+        page = max(1, int(request.query_params.get("page", "1")))
+    except ValueError:
+        page = 1
+    try:
+        page_size = int(request.query_params.get("page_size", "25"))
+    except ValueError:
+        page_size = 25
+    page_size = max(1, min(page_size, 100))
+    count = queryset.count()
+    total_pages = max(1, ceil(count / page_size)) if count else 1
+    if page > total_pages:
+        page = total_pages
+    start = (page - 1) * page_size
+    results = serializer_class(queryset[start:start + page_size], many=True).data
+    return Response(
+        {
+            "results": results,
+            "count": count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
+    )
 
 
 def get_role(user):
@@ -203,6 +244,7 @@ def clear_auth_cookies(response):
 
 
 class CookieTokenObtainPairView(APIView):
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -219,6 +261,7 @@ class CookieTokenObtainPairView(APIView):
 
 
 class CookieTokenRefreshView(APIView):
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -237,6 +280,9 @@ class CookieTokenRefreshView(APIView):
 
 
 class CookieTokenLogoutView(APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
     def post(self, request):
         response = Response(status=status.HTTP_204_NO_CONTENT)
         refresh_token = request.COOKIES.get(settings.JWT_REFRESH_COOKIE_NAME)
@@ -275,10 +321,22 @@ class UserAdminView(APIView):
             if not request.user.is_superuser and (user.is_superuser or get_role(user) == UserProfile.ROLE_ADMIN):
                 return forbidden("Admins cannot view admin or superuser accounts.")
             return Response(UserAdminSerializer(user).data)
-        users = get_user_model().objects.all().order_by("username")
+        users = get_user_model().objects.select_related("profile").all().order_by("username")
         if not request.user.is_superuser:
-            users = [user for user in users if not user.is_superuser and get_role(user) != UserProfile.ROLE_ADMIN]
-        return Response({"users": UserAdminSerializer(users, many=True).data})
+            users = users.filter(is_superuser=False).exclude(profile__role=UserProfile.ROLE_ADMIN)
+        query = request.query_params.get("q", "").strip()
+        role = request.query_params.get("role", "").strip()
+        is_active = request.query_params.get("is_active", "").strip().lower()
+        if query:
+            users = users.filter(Q(username__icontains=query) | Q(email__icontains=query))
+        if role:
+            if role == "superuser":
+                users = users.filter(is_superuser=True)
+            else:
+                users = users.filter(is_superuser=False, profile__role=role)
+        if is_active in ("true", "false"):
+            users = users.filter(is_active=is_active == "true")
+        return paginated_response(users, request, UserAdminSerializer)
 
     def post(self, request):
         if not is_admin(request.user):
@@ -331,7 +389,26 @@ class VisibilityGrantView(APIView):
             except VisibilityGrant.DoesNotExist:
                 return Response({"detail": "Grant not found."}, status=404)
             return Response(VisibilityGrantSerializer(grant).data)
-        return Response({"grants": VisibilityGrantSerializer(VisibilityGrant.objects.all(), many=True).data})
+        grants = VisibilityGrant.objects.select_related("user", "group").all()
+        query = request.query_params.get("q", "").strip()
+        target_type = request.query_params.get("target_type", "").strip()
+        bucket = request.query_params.get("bucket", "").strip()
+        access = request.query_params.get("access", "").strip()
+        if query:
+            grants = grants.filter(
+                Q(role__icontains=query)
+                | Q(user__username__icontains=query)
+                | Q(group__name__icontains=query)
+                | Q(bucket__icontains=query)
+                | Q(prefix__icontains=query)
+            )
+        if target_type:
+            grants = grants.filter(target_type=target_type)
+        if bucket:
+            grants = grants.filter(bucket=bucket)
+        if access:
+            grants = grants.filter(access=access)
+        return paginated_response(grants, request, VisibilityGrantSerializer)
 
     def post(self, request):
         if not is_admin(request.user):
@@ -373,7 +450,13 @@ class AccessGroupView(APIView):
             except AccessGroup.DoesNotExist:
                 return Response({"detail": "Group not found."}, status=404)
             return Response(AccessGroupSerializer(group).data)
-        return Response({"groups": AccessGroupSerializer(AccessGroup.objects.all(), many=True).data})
+        groups = AccessGroup.objects.annotate(member_count=Count("users", distinct=True)).prefetch_related(
+            Prefetch("users", queryset=get_user_model().objects.order_by("username"), to_attr="prefetched_users")
+        ).order_by("name")
+        query = request.query_params.get("q", "").strip()
+        if query:
+            groups = groups.filter(Q(name__icontains=query) | Q(users__username__icontains=query)).distinct()
+        return paginated_response(groups, request, AccessGroupListSerializer)
 
     def post(self, request):
         if not is_admin(request.user):
@@ -468,6 +551,7 @@ class BucketListCreateView(APIView):
 
 class BucketDetailView(APIView):
     def delete(self, request, bucket):
+        bucket = validate_bucket_param(bucket)
         if not is_admin(request.user):
             return forbidden()
         try:
@@ -480,6 +564,7 @@ class BucketDetailView(APIView):
 
 class BucketRewindView(APIView):
     def get(self, request, bucket):
+        bucket = validate_bucket_param(bucket)
         if not has_storage_access(request.user, bucket):
             return forbidden()
         rewind_to = request.query_params.get("rewind_to")
@@ -554,10 +639,9 @@ class BucketRewindView(APIView):
 
 class ObjectView(APIView):
     def get(self, request, bucket, download=False):
-        key = request.query_params.get("key")
+        bucket = validate_bucket_param(bucket)
         if download:
-            if not key:
-                return Response({"detail": "Query parameter 'key' is required."}, status=400)
+            key = get_required_key_param(request)
             if not has_storage_access(request.user, bucket, key):
                 return forbidden()
             params = {"Bucket": bucket, "Key": key}
@@ -624,6 +708,7 @@ class ObjectView(APIView):
         )
 
     def post(self, request, bucket):
+        bucket = validate_bucket_param(bucket)
         serializer = ObjectUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         uploaded_file = serializer.validated_data["file"]
@@ -646,9 +731,8 @@ class ObjectView(APIView):
         return Response({"bucket": bucket, "key": key}, status=status.HTTP_201_CREATED)
 
     def delete(self, request, bucket):
-        key = request.query_params.get("key")
-        if not key:
-            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        bucket = validate_bucket_param(bucket)
+        key = get_required_key_param(request)
         if not has_storage_access(request.user, bucket, key, VisibilityGrant.ACCESS_WRITE):
             return forbidden()
 
@@ -666,9 +750,8 @@ class ObjectView(APIView):
 
 class ObjectShareView(APIView):
     def get(self, request, bucket):
-        key = request.query_params.get("key")
-        if not key:
-            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        bucket = validate_bucket_param(bucket)
+        key = get_required_key_param(request)
         if not has_storage_access(request.user, bucket, key):
             return forbidden()
         try:
@@ -685,7 +768,7 @@ class ObjectShareView(APIView):
             filename = key.split("/")[-1] or "preview"
             params.update(
                 {
-                    "ResponseContentDisposition": f'inline; filename="{filename}"',
+                    "ResponseContentDisposition": content_disposition_header(False, filename),
                     "ResponseContentType": guess_content_type(key),
                 }
             )
@@ -704,9 +787,8 @@ class ObjectShareView(APIView):
 
 class ObjectTagsView(APIView):
     def get(self, request, bucket):
-        key = request.query_params.get("key")
-        if not key:
-            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        bucket = validate_bucket_param(bucket)
+        key = get_required_key_param(request)
         if not has_storage_access(request.user, bucket, key):
             return forbidden()
 
@@ -719,9 +801,8 @@ class ObjectTagsView(APIView):
         return Response({"tags": tags})
 
     def put(self, request, bucket):
-        key = request.query_params.get("key")
-        if not key:
-            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        bucket = validate_bucket_param(bucket)
+        key = get_required_key_param(request)
         if not has_storage_access(request.user, bucket, key, VisibilityGrant.ACCESS_WRITE):
             return forbidden()
 
@@ -744,9 +825,8 @@ class ObjectTagsView(APIView):
 
 class ObjectVersionsView(APIView):
     def get(self, request, bucket):
-        key = request.query_params.get("key")
-        if not key:
-            return Response({"detail": "Query parameter 'key' is required."}, status=400)
+        bucket = validate_bucket_param(bucket)
+        key = get_required_key_param(request)
         if not has_storage_access(request.user, bucket, key):
             return forbidden()
 
