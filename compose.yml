@@ -26,6 +26,8 @@ services:
       DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
       DJANGO_CORS_ALLOWED_ORIGINS: ${DJANGO_CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      DJANGO_USE_X_FORWARDED_HOST: ${DJANGO_USE_X_FORWARDED_HOST:-true}
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
       DB_ENGINE: django.db.backends.postgresql
       DB_NAME: ${POSTGRES_DB:-minio_custom}
@@ -68,7 +70,7 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
     depends_on:
       - backend
     ports:

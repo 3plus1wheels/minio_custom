@@ -116,7 +116,16 @@ Frontend authentication uses httpOnly JWT cookies. In production, serve the fron
 JWT_COOKIE_SECURE=true
 DJANGO_CORS_ALLOWED_ORIGINS=https://app.example.com
 DJANGO_CSRF_TRUSTED_ORIGINS=https://app.example.com
-VITE_API_BASE_URL=https://api.example.com/api
+VITE_API_BASE_URL=/api
+```
+
+The frontend nginx container proxies `/api/` to the backend container. This lets a single public frontend URL, including a Cloudflare Tunnel pointed only at the frontend service, serve both the SPA and API from the same origin. For a temporary trycloudflare URL, include the tunnel host in Django host/CSRF settings:
+
+```env
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,backend,trading-profession-homework-distributed.trycloudflare.com
+DJANGO_CSRF_TRUSTED_ORIGINS=https://trading-profession-homework-distributed.trycloudflare.com
+JWT_COOKIE_SECURE=true
+VITE_API_BASE_URL=/api
 ```
 
 Share links use `MINIO_PUBLIC_ENDPOINT` from `.env`. For local development this can be `http://localhost:9000`. For deployment, set it to the public MinIO API origin users can reach, for example:
